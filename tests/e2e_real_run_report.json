@@ -1,0 +1,321 @@
+{
+  "task_id": "a54fb678-1ace-42d0-bdc4-7ece7191c605",
+  "topic": "AI 芯片市场研报（Writer 切 LongCat 回归）",
+  "scope": [
+    "供给",
+    "需求",
+    "竞争格局"
+  ],
+  "events": [
+    {
+      "event_type": "connection_established",
+      "task_id": "a54fb678-1ace-42d0-bdc4-7ece7191c605",
+      "debug_mode": 0,
+      "timestamp": "2026-09-06T14:09:58.395184",
+      "message": "WebSocket 连接已建立"
+    },
+    {
+      "event_type": "task_done",
+      "task_id": "a54fb678-1ace-42d0-bdc4-7ece7191c605",
+      "timestamp": "2026-09-06T14:11:33.911861",
+      "round": 1,
+      "status": "done",
+      "report_markdown": "# AI 芯片市场研报\n\n## 市场概况\n\nAI 芯片市场作为人工智能产业的核心基础设施，正处于高速增长期。本报告从供给、需求与竞争格局三个维度展开分析，综合评估市场发展态势与结构性风险。\n\n## 供给分析\n\nAI 芯片市场供给端呈现头部集中趋势，先进制程产能受限于晶圆代工厂产能分配，供给弹性较低，短期内产能扩张受限。台积电等头部代工厂的先进制程产能已成为稀缺资源，各大AI芯片厂商的产能获取能力直接决定其市场供给规模。供给端的刚性约束在短期内难以缓解，成为制约市场供给增长的关键瓶颈。\n\n## 需求分析\n\n需求端受大模型训练与推理需求双重驱动，云端AI芯片需求持续增长，边缘侧AI芯片需求增速加快，整体市场需求保持高景气。大模型参数量持续攀升带动训练算力需求爆发式增长，同时AI应用场景的拓展推动推理侧需求快速释放。云端与边缘侧需求共振，为AI 芯片市场提供强劲增长动力。\n\n## 竞争格局\n\n竞争格局方面，NVIDIA凭借CUDA生态壁垒占据主导地位，AMD、Intel及国产AI芯片厂商加速追赶，市场呈多极化竞争态势。NVIDIA凭借软硬件一体的生态优势保持领先，但AMD通过MI300系列等产品持续进攻，Intel依托IDM模式加速布局，国产厂商亦在政策支持下快速崛起，市场竞争日趋激烈。\n\n## 综合结论与展望\n\n综合供需与竞争格局分析，AI 芯片市场处于高速增长期，但地缘政治因素与供应链风险可能对市场格局产生结构性影响，需关注国产替代进程。出口管制、供应链安全等外部因素正重塑市场格局，国产AI芯片厂商迎来历史性机遇窗口，但技术成熟度与生态建设仍需时间积累。建议持续关注地缘政治动态与国产替代进展。\n\n## 引用 / 来源\n\n- [rec-1](https://mock.local/2374/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 1（可信度: medium）\n- [rec-2](https://mock.local/2374/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 2（可信度: medium）\n- [rec-6](https://mock.local/9509/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 1（可信度: medium）\n- [rec-7](https://mock.local/9509/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 2（可信度: medium）\n- [rec-8](https://mock.local/9509/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 3（可信度: medium）\n- [rec-11](https://mock.local/8010/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 1（可信度: medium）\n- [rec-12](https://mock.local/8010/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 2（可信度: medium）\n- [rec-13](https://mock.local/8010/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 3（可信度: medium）\n- [rec-16](https://mock.local/1638/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 1（可信度: medium）\n- [rec-17](https://mock.local/1638/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 2（可信度: medium）\n- [rec-18](https://mock.local/1638/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 3（可信度: medium）\n",
+      "audit_url": "/api/v1/tasks/a54fb678-1ace-42d0-bdc4-7ece7191c605/audit-export",
+      "debug_state": null
+    }
+  ],
+  "validation": [
+    {
+      "event_type": "connection_established",
+      "ok": true,
+      "missing": []
+    },
+    {
+      "event_type": "task_done",
+      "ok": true,
+      "missing": []
+    }
+  ],
+  "final_state": {
+    "task_id": "a54fb678-1ace-42d0-bdc4-7ece7191c605",
+    "status": "done",
+    "created_at": "2026-09-06T14:09:58.358600",
+    "updated_at": "2026-09-06T14:11:33.911840",
+    "user_task": {
+      "topic": "AI 芯片市场研报（Writer 切 LongCat 回归）",
+      "scope": [
+        "供给",
+        "需求",
+        "竞争格局"
+      ],
+      "output_format_spec": "markdown",
+      "constraints": [
+        "中文输出",
+        "结论需标注来源"
+      ]
+    },
+    "routing_state": {
+      "round": 1,
+      "max_rounds": 2,
+      "last_gate": "GateC",
+      "status": "done",
+      "rework_target_agent": null,
+      "rework_reason": null,
+      "gate_review_history": [
+        {
+          "decision": "advance",
+          "reason": "检索结果覆盖了所有子问题，来源可信度均为 medium，且 url 真实",
+          "eval_score": 0.9,
+          "problem_points": [
+            "无"
+          ],
+          "gate": "GateA",
+          "round": 1,
+          "timestamp": "2026-09-06T14:10:38.306657"
+        },
+        {
+          "decision": "advance",
+          "reason": "结论来源 ids 全部存在于检索记录中，且每条结论都有来源标注",
+          "eval_score": 0.9,
+          "problem_points": [
+            "无"
+          ],
+          "gate": "GateB",
+          "round": 1,
+          "timestamp": "2026-09-06T14:11:03.515867"
+        },
+        {
+          "decision": "advance",
+          "reason": "引用章节由 doc_export 确定性重建且覆盖全部检索记录，代码硬校验通过",
+          "eval_score": 0.9,
+          "problem_points": [
+            "无"
+          ],
+          "gate": "GateC",
+          "round": 1,
+          "timestamp": "2026-09-06T14:11:33.602743"
+        }
+      ],
+      "engine_events": [
+        {
+          "event": "writer_citation_regenerated",
+          "agent": "Writer",
+          "gate": null,
+          "reason": "终稿引用章节缺失或含非检索来源的 url，已由 doc_export 确定性重建",
+          "round": 1,
+          "timestamp": "2026-09-06T14:11:30.121771"
+        }
+      ]
+    },
+    "retrieval_records": [
+      {
+        "id": "rec-1",
+        "url": "https://mock.local/2374/1",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 1",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归）」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-2",
+        "url": "https://mock.local/2374/2",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 2",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归）」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-6",
+        "url": "https://mock.local/9509/1",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 1",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 供给」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-7",
+        "url": "https://mock.local/9509/2",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 2",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 供给」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-8",
+        "url": "https://mock.local/9509/3",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 3",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 供给」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-11",
+        "url": "https://mock.local/8010/1",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 1",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 需求」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-12",
+        "url": "https://mock.local/8010/2",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 2",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 需求」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-13",
+        "url": "https://mock.local/8010/3",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 3",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 需求」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-16",
+        "url": "https://mock.local/1638/1",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 1",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-17",
+        "url": "https://mock.local/1638/2",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 2",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      },
+      {
+        "id": "rec-18",
+        "url": "https://mock.local/1638/3",
+        "title": "[MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 3",
+        "snippet": "[MOCK] 这是关于「AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局」的占位内容，非真实检索结果。",
+        "credibility": "medium"
+      }
+    ],
+    "analysis_conclusions": [
+      {
+        "id": "con-1",
+        "claim": "AI 芯片市场供给端呈现头部集中趋势，先进制程产能受限于晶圆代工厂产能分配，供给弹性较低，短期内产能扩张受限",
+        "source_ids": [
+          "rec-6",
+          "rec-7",
+          "rec-8"
+        ],
+        "confidence": "medium"
+      },
+      {
+        "id": "con-2",
+        "claim": "需求端受大模型训练与推理需求双重驱动，云端AI芯片需求持续增长，边缘侧AI芯片需求增速加快，整体市场需求保持高景气",
+        "source_ids": [
+          "rec-11",
+          "rec-12",
+          "rec-13"
+        ],
+        "confidence": "medium"
+      },
+      {
+        "id": "con-3",
+        "claim": "竞争格局方面，NVIDIA凭借CUDA生态壁垒占据主导地位，AMD、Intel及国产AI芯片厂商加速追赶，市场呈多极化竞争态势",
+        "source_ids": [
+          "rec-16",
+          "rec-17",
+          "rec-18"
+        ],
+        "confidence": "medium"
+      },
+      {
+        "id": "con-4",
+        "claim": "综合供需与竞争格局分析，AI 芯片市场处于高速增长期，但地缘政治因素与供应链风险可能对市场格局产生结构性影响，需关注国产替代进程",
+        "source_ids": [
+          "rec-1",
+          "rec-2",
+          "rec-6",
+          "rec-11",
+          "rec-16"
+        ],
+        "confidence": "medium"
+      }
+    ],
+    "draft_segments": [
+      {
+        "id": "seg-1",
+        "section": "市场概况",
+        "content": "AI 芯片市场作为人工智能产业的核心基础设施，正处于高速增长期。本报告从供给、需求与竞争格局三个维度展开分析，综合评估市场发展态势与结构性风险。",
+        "conclusion_ids": [
+          "con-4"
+        ]
+      },
+      {
+        "id": "seg-2",
+        "section": "供给分析",
+        "content": "AI 芯片市场供给端呈现头部集中趋势，先进制程产能受限于晶圆代工厂产能分配，供给弹性较低，短期内产能扩张受限。台积电等头部代工厂的先进制程产能已成为稀缺资源，各大AI芯片厂商的产能获取能力直接决定其市场供给规模。供给端的刚性约束在短期内难以缓解，成为制约市场供给增长的关键瓶颈。",
+        "conclusion_ids": [
+          "con-1"
+        ]
+      },
+      {
+        "id": "seg-3",
+        "section": "需求分析",
+        "content": "需求端受大模型训练与推理需求双重驱动，云端AI芯片需求持续增长，边缘侧AI芯片需求增速加快，整体市场需求保持高景气。大模型参数量持续攀升带动训练算力需求爆发式增长，同时AI应用场景的拓展推动推理侧需求快速释放。云端与边缘侧需求共振，为AI 芯片市场提供强劲增长动力。",
+        "conclusion_ids": [
+          "con-2"
+        ]
+      },
+      {
+        "id": "seg-4",
+        "section": "竞争格局",
+        "content": "竞争格局方面，NVIDIA凭借CUDA生态壁垒占据主导地位，AMD、Intel及国产AI芯片厂商加速追赶，市场呈多极化竞争态势。NVIDIA凭借软硬件一体的生态优势保持领先，但AMD通过MI300系列等产品持续进攻，Intel依托IDM模式加速布局，国产厂商亦在政策支持下快速崛起，市场竞争日趋激烈。",
+        "conclusion_ids": [
+          "con-3"
+        ]
+      },
+      {
+        "id": "seg-5",
+        "section": "综合结论与展望",
+        "content": "综合供需与竞争格局分析，AI 芯片市场处于高速增长期，但地缘政治因素与供应链风险可能对市场格局产生结构性影响，需关注国产替代进程。出口管制、供应链安全等外部因素正重塑市场格局，国产AI芯片厂商迎来历史性机遇窗口，但技术成熟度与生态建设仍需时间积累。建议持续关注地缘政治动态与国产替代进展。",
+        "conclusion_ids": [
+          "con-4"
+        ]
+      }
+    ],
+    "tool_status": [
+      {
+        "agent": "Researcher",
+        "tool": "web_search",
+        "ok": true
+      },
+      {
+        "agent": "Researcher",
+        "tool": "web_search",
+        "ok": true
+      },
+      {
+        "agent": "Researcher",
+        "tool": "web_search",
+        "ok": true
+      },
+      {
+        "agent": "Researcher",
+        "tool": "web_search",
+        "ok": true
+      },
+      {
+        "agent": "Writer",
+        "tool": "doc_export",
+        "ok": true
+      }
+    ],
+    "prior_versions": {
+      "researcher": [],
+      "analyst": [],
+      "writer": [],
+      "Researcher": [
+        []
+      ],
+      "Analyst": [
+        []
+      ],
+      "Writer": [
+        []
+      ]
+    },
+    "report_markdown": "# AI 芯片市场研报\n\n## 市场概况\n\nAI 芯片市场作为人工智能产业的核心基础设施，正处于高速增长期。本报告从供给、需求与竞争格局三个维度展开分析，综合评估市场发展态势与结构性风险。\n\n## 供给分析\n\nAI 芯片市场供给端呈现头部集中趋势，先进制程产能受限于晶圆代工厂产能分配，供给弹性较低，短期内产能扩张受限。台积电等头部代工厂的先进制程产能已成为稀缺资源，各大AI芯片厂商的产能获取能力直接决定其市场供给规模。供给端的刚性约束在短期内难以缓解，成为制约市场供给增长的关键瓶颈。\n\n## 需求分析\n\n需求端受大模型训练与推理需求双重驱动，云端AI芯片需求持续增长，边缘侧AI芯片需求增速加快，整体市场需求保持高景气。大模型参数量持续攀升带动训练算力需求爆发式增长，同时AI应用场景的拓展推动推理侧需求快速释放。云端与边缘侧需求共振，为AI 芯片市场提供强劲增长动力。\n\n## 竞争格局\n\n竞争格局方面，NVIDIA凭借CUDA生态壁垒占据主导地位，AMD、Intel及国产AI芯片厂商加速追赶，市场呈多极化竞争态势。NVIDIA凭借软硬件一体的生态优势保持领先，但AMD通过MI300系列等产品持续进攻，Intel依托IDM模式加速布局，国产厂商亦在政策支持下快速崛起，市场竞争日趋激烈。\n\n## 综合结论与展望\n\n综合供需与竞争格局分析，AI 芯片市场处于高速增长期，但地缘政治因素与供应链风险可能对市场格局产生结构性影响，需关注国产替代进程。出口管制、供应链安全等外部因素正重塑市场格局，国产AI芯片厂商迎来历史性机遇窗口，但技术成熟度与生态建设仍需时间积累。建议持续关注地缘政治动态与国产替代进展。\n\n## 引用 / 来源\n\n- [rec-1](https://mock.local/2374/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 1（可信度: medium）\n- [rec-2](https://mock.local/2374/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） · 结果 2（可信度: medium）\n- [rec-6](https://mock.local/9509/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 1（可信度: medium）\n- [rec-7](https://mock.local/9509/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 2（可信度: medium）\n- [rec-8](https://mock.local/9509/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 供给 · 结果 3（可信度: medium）\n- [rec-11](https://mock.local/8010/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 1（可信度: medium）\n- [rec-12](https://mock.local/8010/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 2（可信度: medium）\n- [rec-13](https://mock.local/8010/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 需求 · 结果 3（可信度: medium）\n- [rec-16](https://mock.local/1638/1) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 1（可信度: medium）\n- [rec-17](https://mock.local/1638/2) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 2（可信度: medium）\n- [rec-18](https://mock.local/1638/3) — [MOCK] AI 芯片市场研报（Writer 切 LongCat 回归） 竞争格局 · 结果 3（可信度: medium）\n",
+    "escalate_reason": null
+  },
+  "captured_at": "2026-09-06T22:11:33.946617"
+}

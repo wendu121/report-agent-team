@@ -1,0 +1,19 @@
+# config/tools.yaml · 工具层配置（M4）
+#
+# 约束：密钥一律从环境变量读取，不落配置文件。
+
+web_search:
+  # tavily = 真实检索（需环境变量 TAVILY_API_KEY）；mock = 占位数据
+  provider: tavily
+  max_results: 5
+  timeout: 20
+  # key 缺失时是否降级为 mock。true=降级并打印醒目告警（不静默冒充真实检索）；
+  # false=直接抛 ToolError，由 tool_status.ok=false 流入 Gate 判 rework/escalate。
+  fallback_to_mock: true
+
+data_proc:
+  enabled: true     # Analyst 的安全算术求值（AST 白名单，非 eval）
+
+doc_export:
+  enabled: true     # 引用章节确定性补齐 / 导出
+  export_dir: outputs   # 相对项目根；置空则不落盘

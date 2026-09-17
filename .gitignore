@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 输出文件（保留 outputs/ 用于测试，但忽略其中的临时文件）
+outputs/*.tmp
+
+# 敏感信息
+.env
+*.key
+*.pem
+
+# 临时文件
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 前端依赖与构建缓存
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# 引擎运行时状态（任务输入/输出 dump，非源码）
+.engine_state/
+
+# 生成产物（真实运行报告为测试产物，不入库；e2e 回归报告在 tests/ 保留）
+outputs/
+
+# ChatAgent 经验手册（运行时生成：用户「记住：…」→ 管理员 accept 产出，非源码）
+config/chat_playbook.yaml
+
+# M11-2 反思建议草稿（运行时生成：引擎每任务终态产出 proposed，管理员 accept/reject 后留痕，非源码）
+config/reflections.proposed.yaml
+
+# M8-1 配置控制台审计日志（运行时产物：改动 before/after + .bak 快照，不入库）
+# 与 config/ 一样是 bind mount 目录，误入库会污染仓库且含历史配置快照
+.audit/
+
+# M9-2 数据源密钥（admin connect 写 DS_*_API_KEY，绝不入库）
+.secrets/
+
+# 仓库快照备份（非源码，误入库会膨胀历史；目录名带前导点）
+.git-backup-*/
+
+# T44 聊天体受限沙箱工作目录（运行时生成，绝不入库）
+.chat_sandbox/
+

@@ -1,0 +1,35 @@
+# config/mcp_servers.yaml · M11-3 MCP server 注册表（SoT）
+# 每个 server 经 function-calling 暴露其工具给 Researcher/Analyst。
+#
+# 字段：
+#   id            : 唯一标识（dispatch_tool 路由用 mcp:{id}:{tool}）
+#   name          : 展示名
+#   transport     : sse | http（streamable http）。stdio 跨容器坑多，M11-3 不支持。
+#   url           : SSE/HTTP 端点
+#   headers       : 鉴权头（如 {"Authorization": "Bearer xxx"}）。密钥不进 git；
+#                   生产建议从 .secrets/mcp.env 注入后由部署层回填，或在此处直接写（仅私有部署）。
+#   enabled       : true/false（真·控制器：关掉即不暴露工具，无需改代码）
+#   tools_whitelist: 仅暴露的白名单工具名；空=全部
+#
+# 新增一个外部 MCP 工具只需在此加一项并 enabled: true（引擎热加载，无需重启）。
+
+servers:
+  # 真实公共 MCP server（streamable HTTP，无需鉴权）：GitHub 仓库知识问答。
+  # 工具：ask_question / read_wiki_structure / read_wiki_contents
+  # 实测：host 与 report-api 容器均可直连（HTTP 200，initialize 正常）。
+  - id: deepwiki
+    name: DeepWiki（GitHub 仓库知识问答）
+    transport: http
+    url: https://mcp.deepwiki.com/mcp
+    headers: {}
+    enabled: true
+    tools_whitelist: []
+
+  # 本地自建 MCP server 示例（SSE 型，须与 api 同网络或经 host.docker.internal 可达）：
+  # - id: weather
+  #   name: 天气服务
+  #   transport: sse
+  #   url: http://host.docker.internal:8001/sse
+  #   headers: {}
+  #   enabled: false
+  #   tools_whitelist: []

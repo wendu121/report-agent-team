@@ -1,0 +1,93 @@
+# 研报推送渠道 SoT（M9-4）。
+# status 由引擎/admin 按 enabled + endpoint 实况重算，此处初值仅展示默认。
+# 真·控制器：enabled + endpoint 已填 → 研报完成真向外发；coming_soon 永不发。
+# 字段为适配真控制器引擎做的扁平化超集（平台 §3.4 YAML 为参考示意，见 DESIGN_M9-4 §17.1）。
+channels:
+  - id: dingtalk
+    name: 钉钉
+    icon: /channels/dingtalk.svg
+    category: 即时通讯
+    description: 研报完成后推送到钉钉群机器人（markdown）
+    channel_type: webhook
+    payload_format: dingtalk
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: disconnected
+  - id: feishu
+    name: 飞书
+    icon: /channels/feishu.svg
+    category: 即时通讯
+    description: 研报完成后推送到飞书群机器人（text）
+    channel_type: webhook
+    payload_format: feishu
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: disconnected
+  - id: wecom
+    name: 企业微信
+    icon: /channels/wecom.svg
+    category: 即时通讯
+    description: 研报完成后推送到企业微信群机器人（markdown）
+    channel_type: webhook
+    payload_format: wecom
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: disconnected
+  - id: discord
+    name: Discord
+    icon: /channels/discord.svg
+    category: 即时通讯
+    description: 研报完成后推送到 Discord webhook（content）
+    channel_type: webhook
+    payload_format: discord
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: disconnected
+  - id: mock                                  # 本地测试通道：零配置、真落盘，验证控制器效应
+    name: 本地测试通道
+    icon: /channels/mock.svg
+    category: 测试
+    description: 研报完成后写入本地投递日志（不外发），用于验证推送链路
+    channel_type: mock
+    strategy: [on_complete, on_gate_fail]
+    endpoint: ""
+    enabled: true                             # 默认开：开箱即证明 pipeline 工作
+    installed: true
+    builtin: true
+    status: connected
+  - id: telegram
+    name: Telegram
+    icon: /channels/telegram.svg
+    category: 即时通讯
+    description: 研报完成后推送到 Telegram（需 bot token，待接入）
+    channel_type: coming_soon
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: coming_soon
+  - id: wechat
+    name: 微信
+    icon: /channels/wechat.svg
+    category: 即时通讯
+    description: 研报完成后推送到微信（需公众号/企业资质，待接入）
+    channel_type: coming_soon
+    strategy: [on_complete]
+    endpoint: ""
+    enabled: false
+    installed: true
+    builtin: true
+    status: coming_soon

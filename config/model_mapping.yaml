@@ -1,0 +1,81 @@
+# config/model_mapping.yaml · 角色→模型映射（M2 落地，M5 对齐本机 new-api 网关可用模型）
+#
+# 作用：缓解同源模型自我确认偏差——Gate 优先分配与对应产出 Agent 不同基座的模型（DESIGN §10 / §11-1）。
+# 约束：Agent / Gate 的 prompt 文本一律不绑定模型名，模型完全由此文件控制。
+# 底层：经 new-api 网关；key / 故障转移 / 负载由网关处理（DESIGN §3）。
+#
+# 2026-09-04 更新（第 3 次）：首次映射的 siliconflow 通道（deepseek/qwen）实测
+#   `do_request_failed`、gemini-pro-latest 命中 429 配额；本次 google(gemini-3.5-flash)
+#   的 free-tier 限额(20 次/周期)也已耗尽，Writer/GateA 两次实跑撞 429。
+#   故改为踩当前可用 3 个上游（custom/LongCat-2.0、zhipu/glm-4.7、cloudflare/llama-3.3-70b），
+#   并把 Writer/GateA 移出 google。保持异基座隔离。若日后通道恢复/新增，只改本文件，prompt 不动。
+#
+# 2026-09-06 更新（第 4 次 · TD-004 方案 A）：zhipu/glm-4.7 通道 429「余额不足」(code 1113) 配额耗尽。
+#   Analyst → custom/LongCat-2.0、GateA → cloudflare/llama-3.3-70b；Writer 当时保留 glm-4.7 观察。
+# 2026-09-06 更新（第 5 次 · TD-004 预授权执行）：e2e 第五轮证实 Writer 仍撞 glm-4.7 429
+#   （两轮 agent_output_unusable），按 boss 预授权「Writer 切 LongCat-2.0」执行；
+#   因 Writer 改入 custom 基座，GateC 原 custom/LongCat-2.0 将违反硬约束 1（Gate 与所审 Agent 同基座），
+#   故 GateC 同步改为 cloudflare/llama-3.3-70b（GateA/GateB 已用 llama 实测 advance 0.9，结构化输出可用）。
+
+roles:
+  Researcher:
+    base: custom
+    model: LongCat-2.0
+  Analyst:
+    base: custom            # 2026-09-06 改绑：原 zhipu/glm-4.7 通道 429 配额耗尽；改 custom/LongCat-2.0（GateB 已异基座隔离，见下）
+    model: LongCat-2.0
+  Writer:
+    base: custom            # 2026-09-06 改绑：zhipu/glm-4.7 通道 429（e2e 第五轮两轮 agent_output_unusable）
+                            # → custom/LongCat-2.0（Analyst 同模型已实测稳定产出结构化数组）
+    model: LongCat-2.0
+  # --- M10-P4 电商 Agent（builtin: false，默认链路不含，仅显式 agents=[...] 时启用）---
+  # 硬约束 1 校核：MarketScout→GateA(cloudflare)、EcomAnalyst/SourcingAdvisor→GateB(cloudflare)，
+  #   三条均绑 custom 基座，与各自 Gate 异基座 ✅
+  MarketScout:
+    base: custom
+    model: LongCat-2.0
+  EcomAnalyst:
+    base: custom
+    model: LongCat-2.0
+  SourcingAdvisor:
+    base: custom
+    model: LongCat-2.0
+
+gates:
+  # 必须错开对应产出 Agent 的基座，避免自审包庇
+  GateA:
+    reviews: Researcher
+    base: cloudflare            # 2026-09-06 改绑：原 zhipu/glm-4.7 通道 429 配额耗尽；改 cloudflare/llama-3.3-70b 以异于 Researcher(custom)
+    model: llama-3.3-70b
+    # ⚠️ 风险标注：llama-3.3-70b 历史实测「不按 schema 出 draft_segments / 结构化输出不稳定」，
+    # 本引擎依赖 orchestrator.py 的 robust_json_load() 容错（去围栏/括号配对抽取）兜底，
+    # 非 100% 保证；若 GateA 审核解析异常，优先排查该模型 schema 稳定性而非代码。
+    # ✅ 2026-09-06 实测背书：GateA/GateB 均用 llama 并正常输出 gate_output、advance(eval_score 0.9)。
+  GateB:
+    reviews: Analyst
+    base: cloudflare       # 异于 Analyst(custom)
+    model: llama-3.3-70b
+  GateC:
+    reviews: Writer
+    base: cloudflare       # 2026-09-06 改绑：Writer 移入 custom 后，原 custom/LongCat-2.0 与 Writer 同基座违反硬约束 1
+                           # → cloudflare/llama-3.3-70b（GateA/GateB 同模型已有 advance 实测背书）
+    model: llama-3.3-70b
+
+eval:
+  # 评分模型，仅辅助 Gate，不替代业务规则（DESIGN §6 / §10）
+  base: custom
+  model: LongCat-2.0
+
+# ChatAgent（对话入口）的 function-calling 工具环路由哪条模型承载。
+# 必须选一个真实支持 OpenAI tools/tool_choice 的模型； universal alias（如 auto-chat）
+# 可能路由到不支持工具或配额耗尽的渠道，导致 ChatAgent「不能自主上网」。
+chat:
+  tool_model: LongCat-2.0
+
+# 硬约束：
+#   1. gates.*.base 必须 != roles.<reviews>.base
+#   2. 新增角色 / 闸时须在此登记，禁止在 prompt 中硬编码模型名
+#   3. model 字段值经 new-api 网关解析，可随时切换闭源/开源模型而不改 prompt
+#
+# 待恢复备注（TD-004）：待 zhipu/glm-4.7 通道恢复（充值 / 上游解除限流）后可切回原映射，
+#   即 Writer → zhipu/glm-4.7 且 GateC 同步回 custom/LongCat-2.0；prompt 与代码均不动。

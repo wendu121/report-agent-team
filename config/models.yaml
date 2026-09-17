@@ -1,0 +1,81 @@
+# config/models.yaml · 可选模型接口 + OpenAI 兼容端点（DESIGN_OPENAI_ENDPOINTS.md）
+#
+# endpoints ：任意 OpenAI 兼容服务（base_url + api_key）。密钥用 ${ENV:-default} 占位符，
+#            由 .env 注入，不落盘进本文件（与 WorkBuddy 自由接入任意 OpenAI 接口对齐）。
+# interfaces：前端下拉的可选项；每项指向 (endpoint_id, model_id)，或 kind=auto 沿用映射。
+# gateway   ：是否从某端点拉取真实模型列表（动态合并，不硬编码）。
+#
+# 热加载：本文件由 GET /models 每次读取（零重启）。新增端点/接口只改此处。
+
+# ---------------------------------------------------------------------------
+# OpenAI 兼容端点（可配多个；新增一个 = 自由接入一个新服务）
+# ---------------------------------------------------------------------------
+endpoints:
+  - id: new-api
+    name: new-api 网关
+    base_url: "${NEWAPI_BASE_URL:-http://host.docker.internal:3000/v1}"
+    api_key: "${NEWAPI_API_KEY:-}"
+    default: true
+  # 示例（接入即填 .env 对应密钥，无需改代码）：
+  # - id: siliconflow
+  #   name: SiliconFlow
+  #   base_url: "${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}"
+  #   api_key: "${SILICONFLOW_API_KEY:-}"
+  # - id: deepseek-official
+  #   name: DeepSeek 官方
+  #   base_url: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
+  #   api_key: "${DEEPSEEK_API_KEY:-}"
+
+# ---------------------------------------------------------------------------
+# 模型接口（ChatEntry 模型接口下拉）
+# ---------------------------------------------------------------------------
+# kind 含义：
+#   auto     ：不覆盖，沿用 model_mapping.yaml 的 role→model 映射（推荐）
+#   universal：网关 universal alias 融合池（auto-chat/reasoning/fast/vision），由网关自动路由
+#   concrete ：具体已接入模型
+# 每个非 auto interface 绑定 endpoint_id + model_id → complete() 时动态路由到对应端点。
+interfaces:
+  - id: auto
+    name: 自动
+    description: 由 model_mapping.yaml 决定（推荐，保持 Gate 异基座隔离）
+    kind: auto
+    default: true
+  - id: auto-chat
+    name: 通用对话
+    description: 通用接口 · new-api 自动路由常规对话模型
+    kind: universal
+    endpoint: new-api
+    model_id: auto-chat
+  - id: auto-reasoning
+    name: 深度推理
+    description: 通用接口 · new-api 自动路由强推理模型
+    kind: universal
+    endpoint: new-api
+    model_id: auto-reasoning
+  - id: auto-fast
+    name: 快速响应
+    description: 通用接口 · new-api 自动路由轻量快速模型
+    kind: universal
+    endpoint: new-api
+    model_id: auto-fast
+  - id: auto-vision
+    name: 多模态
+    description: 通用接口 · new-api 自动路由视觉/多模态模型
+    kind: universal
+    endpoint: new-api
+    model_id: auto-vision
+  - id: LongCat-2.0
+    name: LongCat-2.0
+    description: 当前自定义基座主力模型（与 model_mapping.yaml 同源）
+    kind: concrete
+    endpoint: new-api
+    model_id: LongCat-2.0
+
+# ---------------------------------------------------------------------------
+# 模型网关：从 new-api（OpenAI 兼容）动态拉取真实可用模型，开放给用户自由选择
+# ---------------------------------------------------------------------------
+gateway:
+  fetch_from_gateway: true   # false = 仅返回本地 interfaces（旧行为，逃生口）
+  timeout: 10                 # 拉取 /v1/models 超时（秒）
+  cache_seconds: 60           # 网关模型列表内存缓存（避免每次刷新都请求网关）
+  # url / api_key 取自 endpoints.new-api（default endpoint），不再单独配置

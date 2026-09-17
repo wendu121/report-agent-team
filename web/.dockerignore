@@ -1,0 +1,7 @@
+# web/.dockerignore · TD-006 前端构建上下文排除（D6 延伸：避免 node_modules 进镜像）
+node_modules
+dist
+.vite
+*.tsbuildinfo
+.git
+.gitignore

@@ -1,0 +1,48 @@
+# report-agent-team · M3 + M6 依赖
+# 编排框架
+langgraph>=0.2
+# new-api 网关客户端（OpenAI 兼容，NewApiLLMClient 延迟导入）
+openai>=1.30
+# 角色→模型映射
+pyyaml>=6.0
+
+# ============ M6 服务层依赖 ============
+# FastAPI 服务层
+fastapi>=0.104
+uvicorn[standard]>=0.24
+# WebSocket 支持
+websockets>=12.0
+# 数据验证
+pydantic>=2.0
+# HTTP 客户端（引擎 CLI 封装）
+httpx>=0.25
+
+# ============ 持久层依赖（TD-006：原 requirements 缺失，容器启动必 ImportError） ============
+# PostgreSQL 同步 ORM 引擎（sync_engine 用 postgresql:// 默认 psycopg2 驱动）
+sqlalchemy>=2.0
+# PostgreSQL 同步驱动（init_database() 经 sync_engine 建表，必须 psycopg2；docker build 验证曾报 ModuleNotFoundError）
+psycopg2-binary>=2.9
+# PostgreSQL 异步驱动（ASYNC_DATABASE_URL 用 postgresql+asyncpg://）
+asyncpg>=0.29
+# Redis 异步客户端（server/database.py RedisClient 用）
+redis>=5.0
+
+# ============ M8-1 配置控制台依赖 ============
+# 保留注释的 YAML round-trip 读写（config/model_mapping.yaml 含 5 次变更历史与风险标注，
+# PyYAML 的 safe_dump 会丢弃全部注释 → 配置回写强制依赖 ruamel，缺失时 admin API fail loud
+# 而非静默降级，见 server/admin.py::_yaml_rt）
+ruamel.yaml>=0.18
+
+# ============ 账号体系（Phase 1 · DESIGN_account_hierarchy.md） ============
+# JWT 签发/校验（HS256）。
+# 注：python-jose 是 python-jose 的官方包名，需 cryptography 后端做 HS256。
+python-jose[cryptography]>=3.3
+# 口令哈希（bcrypt 直接调用，不经 passlib —— passlib 1.7.4 与 bcrypt>=4.0.1 已知不兼容
+# `AttributeError: module 'bcrypt' has no attribute '__about__'`，见设计文档 §6 技术纠偏）
+bcrypt>=4.0
+
+# ============ M11-3 MCP 消费桥 ============
+# MCP 客户端 SDK（SSE / Streamable HTTP transport）。stdio 跨容器坑多，M11-3 暂不内置。
+# 固定 1.x：tools/mcp_client.py 依赖 1.x 的 mcp.client.sse.sse_client /
+# mcp.client.streamable_http.streamablehttp_client 路径；2.x 有 API 重构风险，暂不跟进。
+mcp>=1.0,<2.0

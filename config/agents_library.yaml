@@ -1,0 +1,109 @@
+# config/agents_library.yaml · 智能体库（M9-1 接管 orchestrator.py 原 4 个硬编码字典）
+#
+# 作用：成为 Agent 角色的唯一事实源（SoT），取代 orchestrator 的
+#   PROD_KEY / TOOL / GATE_NAME / GATE_REVIEWS 四个硬编码字典。
+# 热加载：orchestrator.run_report() 每次执行 load_agent_registry()
+#   （mirror load_model_mapping），改完下一个任务即生效，无需重启容器。
+#
+# 派生关系（load_agent_registry 运行时计算，不在此文件重复存）：
+#   PROD_KEY[role]  = output_key
+#   TOOL[role]      = tool
+#   GATE_NAME[role] = gate
+#   GATE_REVIEWS[gate] = role（反查）
+#   gate_shape[gate]  = agents[role].shape
+#
+# 硬约束：
+#   1. shape ∈ {researcher, analyst, writer}（决定工具分发/产出键/闸校验形态）
+#   2. output_key 由 shape 强制推导，不允许自由填：
+#      researcher → retrieval_records / analyst → analysis_conclusions / writer → draft_segments
+#   3. 每个自定义 agent 的 gate.base 必须 != 其 role.base（异基座，防自审包庇，
+#      由 server/admin.py 在复合写时校验，并复用 model_mapping 的 _validate_mapping）
+#   4. 内置 agent（builtin: true）不可删；UI 只读
+#
+# 2026-09-08 初始落地（M9-1）：内置 3 角色，与 M8-5 子集编排默认链一致。
+
+agents:
+- id: Researcher
+  name: 研究员
+  avatar: ""                         # 空=前端渲染首字母圆（R 绿底）
+  tags: [调研, 信息检索]
+  description: 负责信息检索与事实核证，产出 retrieval_records（上游源头）
+  shape: researcher
+  tool: web_search
+  output_key: retrieval_records
+  gate: GateA
+  visibility: public
+  builtin: true
+
+- id: Analyst
+  name: 分析师
+  avatar: ""
+  tags: [分析, 财务]
+  description: 基于检索素材做结构化分析，产出 analysis_conclusions（引用链校验）
+  shape: analyst
+  tool: data_proc
+  output_key: analysis_conclusions
+  gate: GateB
+  visibility: public
+  builtin: true
+
+- id: Writer
+  name: 撰稿人
+  avatar: ""
+  tags: [写作, 整合]
+  description: 整合分析结论撰写终稿，产出 draft_segments + report_markdown（引用章节确定性重建）
+  shape: writer
+  tool: doc_export
+  output_key: draft_segments
+  gate: GateC
+  visibility: public
+  builtin: true
+
+# ---- M10-P4：电商竞品分析角色组 ----
+# ⚠️ builtin: false 是刻意的：default_chain() 取 builtin 条目，若置 true 会静默改变
+#    所有既有任务的角色链与闸数，破坏回归。这三个角色须由模板/任务显式选中（M8-5 子集编排）。
+- id: MarketScout
+  name: 市场侦察
+  avatar: ""
+  tags: [电商, 市场调研, 竞品情报]
+  description: 电商市场与竞品情报检索（竞品关键词/平台动向/关税合规），产出 retrieval_records
+  shape: researcher
+  tool: web_search
+  output_key: retrieval_records
+  gate: GateA
+  visibility: public
+  builtin: false
+
+- id: EcomAnalyst
+  name: 电商分析师
+  avatar: ""
+  tags: [电商, 竞品分析, 成本结构]
+  description: 电商竞品对标 + 关税/落地成本 + 利润空间测算，产出 analysis_conclusions
+  shape: analyst
+  tool: data_proc
+  output_key: analysis_conclusions
+  gate: GateB
+  visibility: public
+  builtin: false
+
+- id: SourcingAdvisor
+  name: 选品顾问
+  avatar: ""
+  tags: [电商, 选品, 决策]
+  description: 需求×竞争×成本×合规 四维评估，输出选品决策建议，产出 analysis_conclusions
+  shape: analyst
+  tool: data_proc
+  output_key: analysis_conclusions
+  gate: GateB
+  visibility: public
+  builtin: false
+
+# 自定义 Agent 由 UI「新增智能体」自动追加，形态示例（shape=researcher，output_key 强制 retrieval_records）：
+#  - id: Coder
+#    name: 代码分析师
+#    shape: researcher
+#    tool: web_search
+#    output_key: retrieval_records
+#    gate: GateD
+#    visibility: private
+#    builtin: false

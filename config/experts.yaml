@@ -1,0 +1,23 @@
+# 专家团注册表（M12-3）
+#
+# 这里**只存注册表映射**，专家包本体在 experts/<kebab-name>/（WorkBuddy 专家包规范 v2.0 原生格式）。
+# 这样 WorkBuddy 生态的专家包可原样导入、零转换，同时不破坏「配置即控制器」立约。
+#
+# 字段：
+#   id              唯一标识（kebab-case，与包目录名一致）
+#   dir             包目录（相对项目根）
+#   enabled         是否启用（UI 可改，改完下个任务/对话即生效）
+#   shape           映射到的引擎执行形态：researcher / analyst / writer
+#   model           模型偏好（留空 = 走 model_mapping.yaml 默认）
+#   source_url      来源溯源（从哪个 URL 导入/转化而来）
+#   installed_at    安装时间
+#   allow_team_downgrade  仅 expertType=team 的包需要：true 表示接受
+#                   「降级为单专家 + 主理人提示」（语义有损），默认不设 = 拒绝
+experts:
+- id: financial-statement-analyst
+  dir: experts/financial-statement-analyst
+  enabled: true
+  shape: analyst
+  model: ''
+  source_url: ''
+  installed_at: '2026-09-15T12:22:20'

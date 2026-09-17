@@ -1,0 +1,84 @@
+{
+  "schema_version": "2.0",
+  "name": "financial-statement-analyst",
+  "version": "1.0.0",
+  "description": "Analyzes the three financial statements with DuPont decomposition and cash-flow quality checks.",
+  "expertType": "agent",
+  "agentName": "financial-statement-analyst",
+  "agents": [
+    "agents/financial-statement-analyst.md"
+  ],
+  "skills": [],
+  "displayName": {
+    "en": "Financial Statement Analyst",
+    "zh": "财报分析专家"
+  },
+  "profession": {
+    "en": "Financial Analyst",
+    "zh": "财务分析师"
+  },
+  "displayDescription": {
+    "en": "Breaks down the three financial statements and locates profit drivers and risk points with DuPont decomposition.",
+    "zh": "逐项拆解三大财务报表，用杜邦分解定位盈利驱动与风险点，输出可复核的财务质量结论与跟踪指标。"
+  },
+  "categoryId": "09-FinanceAccounting",
+  "tags": [
+    "财报分析",
+    "杜邦分解",
+    "现金流质量"
+  ],
+  "quickPrompts": [
+    "帮我分析这家公司最近一期财报的盈利质量与风险点",
+    "对比两家公司近三年的毛利率、费用率与 ROE 差异",
+    "这份财报里有哪些需要重点核实的异常科目"
+  ],
+  "defaultInitPrompt": "帮我分析这家公司最近一期财报的盈利质量与风险点",
+  "avatar": "avatars/expert.png",
+  "plugin": "financial-statement-analyst",
+  "requires": {
+    "workbuddy_version": ">=1.0.0",
+    "connectors": [
+      "neodata-financial-search"
+    ],
+    "mcp": []
+  },
+  "provides": {
+    "agents": [
+      {
+        "id": "financial-analyst",
+        "prompt_file": "agents/financial-statement-analyst.md",
+        "priority": 10
+      }
+    ],
+    "workflows": [
+      {
+        "id": "duPont-analysis",
+        "version": "1.0.0",
+        "steps": [
+          "fetch-financials",
+          "triplet-check",
+          "dupont-decompose",
+          "peer-compare",
+          "risk-flag"
+        ]
+      }
+    ],
+    "presets": [
+      {
+        "id": "a-share-standard",
+        "version": "1.0.0",
+        "strategy": "append",
+        "priority": 5
+      }
+    ]
+  },
+  "catalog": {
+    "source": "",
+    "pin_version": "1.0.0",
+    "offline_policy": "install-allowed",
+    "integrity": {
+      "manifest_sha256": "",
+      "files": []
+    }
+  }
+}

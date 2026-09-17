@@ -1,0 +1,13 @@
+name: 标准研报
+description: 三 Agent + 三闸 通用研报协作流程
+agents:
+- Researcher
+- Analyst
+- Writer
+gates:
+- GateA
+- GateB
+- GateC
+output_format:
+- markdown
+ui_mode: unified_shell

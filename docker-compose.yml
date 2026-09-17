@@ -1,0 +1,131 @@
+# docker-compose.yml · TD-006 完整编排（推荐默认 D2/D7/D8/D9）
+# 服务：web(Nginx 静态 + 反代) / api(FastAPI) / postgres / redis
+# 环境变量：compose 自动读取项目根 .env（供 ${} 替换）；env_file 将 .env 注入 api 容器运行时
+# 机密（NEWAPI_*/TAVILY_API_KEY）仅存于 .env（已被 .gitignore 忽略），不入库
+
+services:
+  # ============ PostgreSQL (pgvector) ============
+  # M11-1：须用 pgvector 镜像以支持 vector 类型（原 postgres:15-alpine 无 vector 扩展）。
+  # 镜像替换不影响既有 postgres_data 卷；但须手动对新库执行 db/init/01_kb.sql
+  # （docker entrypoint 仅在数据目录为空时自动跑 init，升级场景需手动 exec）。
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: report-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-report_agent_team}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - report-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # D9：数据库不暴露到宿主，仅内部网络
+
+  # ============ Redis ============
+  redis:
+    image: redis:7-alpine
+    container_name: report-redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - report-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============ FastAPI 服务层 ============
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: report-api
+    environment:
+      # 非机密：由 compose 内拼接（依赖 postgres/redis 服务名）
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-report_agent_team}
+      ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-report_agent_team}
+      REDIS_URL: redis://redis:6379/0
+      # ---- M11/Boss：外网源出网代理（可选，默认关闭；.env 设 CHAT_PROXY 启用）----
+      # 宿主代理规则「绕过大陆」：大陆域名直连、境外走代理 → 内外网都通。
+      # 启用：在 .env 加 CHAT_PROXY=http://host.docker.internal:10808（HTTP/HTTPS 同值）。
+      # 置空（默认）退化为直连，避免「代理不可达」时全盘退化（此前 open-meteo 直连偶发重置）。
+      # 前置条件：宿主代理须监听「容器可访问」的网卡（开启 Allow LAN / 监听 0.0.0.0），
+      #   仅绑 127.0.0.1 时容器连不上 → 启用后 chat 反更糟，请先确认代理 LAN 可达。
+      # NO_PROXY 已含内部服务（postgres/redis/api/web/本机）防自环；若 new-api 网关走内网域名，
+      #   也请加入 no_proxy（如 ,newapi-host）。
+      HTTP_PROXY: ${CHAT_PROXY:-}
+      HTTPS_PROXY: ${CHAT_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1,postgres,redis,api,web,host.docker.internal
+      http_proxy: ${CHAT_PROXY:-}
+      https_proxy: ${CHAT_PROXY:-}
+      no_proxy: localhost,127.0.0.1,::1,postgres,redis,api,web,host.docker.internal
+    # 机密：从 .env 注入（NEWAPI_*/TAVILY_API_KEY）
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./outputs:/app/outputs
+      - ./.engine_state:/app/.engine_state
+      # 多租户：每个账号的资源命名空间（config/agents/gates/templates/skills/experts/.secrets/.audit
+      # + 各自的 .engine_state）都落在 tenants/<account_id>/ 下；主账号由首个注册启动 seed_from_base 播种。
+      # 必须持久化，否则容器重建后所有账号配置/密钥/任务全丢。
+      - ./tenants:/app/tenants
+      # M8-1：配置控制台要求「UI 改的配置必须持久化」。config 原本是 COPY 进镜像的，
+      # 容器一重建就会回退到镜像默认值 —— 那样 UI 改动等于白改，违背「UI 是 controller」立约。
+      - ./config:/app/config
+      # 审计日志同样须持久化：否则容器重建后 .audit/models/*.{json,bak} 全丢，
+      # 「改动可追溯 + 可回滚」立约落空（第 11 轮独立审议纠出）
+      - ./.audit:/app/.audit
+      # M8-2：Agent prompt 编辑同样须持久化（orchestrator.build_agent_system 每次
+      # 从 /app/agents/*.md 现读，不 mount 则 UI 改完容器一重建就回退）。
+      - ./agents:/app/agents
+      # M8-3：Gate 审核规则编辑同样须持久化（orchestrator.build_gate_system 每次
+      # 从 /app/gates/review.md 现读，不 mount 则 UI 改完容器一重建就回退）。
+      - ./gates:/app/gates
+      # M8-4：任务模板编辑同样须持久化（server/admin.py 把 templates/*.yaml 现读，
+      # 不 mount 则 UI 增删改的模板容器一重建就回退）。TD-008 四类配置挂载闭环。
+      - ./templates:/app/templates
+      # M9-2：数据源密钥持久化（admin connect 写 .secrets/plugins.env，密钥不进 config/plugins.yaml）
+      - ./.secrets:/app/.secrets
+      # M9-3：技能 md 片段持久化（orchestrator.build_skill_context 每次从 /app/skills/<id>.md 现读，
+      # 不 mount 则 UI/Admin 新增/启用的自定义技能容器一重建就回退，且内置 skills/*.md 不会被宿主遮蔽。
+      # NOTE-1：bind mount 会遮罩镜像内 /app/skills，宿主 ./skills 须非空（含 5 个内置 md），否则控制器静默失效。
+      - ./skills:/app/skills
+    networks:
+      - report-net
+    # D9：api 不暴露到宿主，经 web 反代访问（调试可临时加 ports: ["8000:8000"]）
+    expose:
+      - "8000"
+
+  # ============ 前端（Nginx 静态 + 反代 /api） ============
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: report-web
+    ports:
+      # D9 修订（TD-007）：8080 与宿主既有容器 mailhub-web 冲突（二者互斥），
+      # 改映射 18080:80。宿主端口分配见 PORT_REGISTRY.md。
+      - "18080:80"
+    depends_on:
+      - api
+    networks:
+      - report-net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  report-net:
+    name: report-network

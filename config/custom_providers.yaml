@@ -1,0 +1,7 @@
+providers:
+- id: Intern-S2-Preview-397B
+  name: Intern-S2-Preview-397B
+  base_url: https://chat.intern-ai.org.cn/api/v1
+  model_ids:
+  - Intern-S2-Preview-397B
+  enabled: true

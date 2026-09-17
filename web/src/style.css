@@ -1,0 +1,480 @@
+:root {
+  /* surfaces */
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --aside-bg: #161e2e;
+  --aside-color: #cbd5e1;
+
+  /* brand + role colors */
+  --brand: #0f9d76;
+  --brand-strong: #0b7d5e;
+  --brand-soft: #e7f7f0;
+  --accent: #f59e0b;
+  --accent-soft: #fef3e2;
+  --info: #3b82f6;
+  --info-soft: #eaf1fe;
+  --danger: #ef4444;
+  --danger-soft: #fdecec;
+
+  /* ink (text scale) */
+  --ink-900: #0f172a;
+  --ink-700: #334155;
+  --ink-600: #475569;
+  --ink-500: #64748b;
+  --ink-400: #94a3b8;
+  --ink-300: #cbd5e1;
+
+  /* lines */
+  --line: #e6e9ef;
+  --line-strong: #d6dbe4;
+
+  /* radius */
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 16px;
+  --r-xl: 20px;
+
+  /* shadows (layered, never heavy) */
+  --sh-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --sh-md: 0 6px 16px rgba(15, 23, 42, 0.08);
+  --sh-lg: 0 14px 36px rgba(15, 23, 42, 0.12);
+
+  /* spacing — 4pt grid */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+
+  --font: 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.app-shell {
+  height: 100vh;
+}
+
+.app-aside {
+  background: var(--aside-bg);
+  color: var(--aside-color);
+}
+
+.brand {
+  padding: 18px 16px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.app-menu {
+  background: transparent;
+  border-right: none;
+}
+
+.app-menu .el-menu-item {
+  color: var(--aside-color);
+}
+
+.app-menu .el-menu-item.is-active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-bottom: 1px solid #ebeef5;
+}
+
+.page-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.debug-label {
+  font-size: 13px;
+  color: #606266;
+}
+
+.app-main {
+  background: var(--bg);
+  padding: 20px;
+}
+
+/* 时间线基础样式 */
+.timeline {
+  position: relative;
+  padding-left: 8px;
+}
+
+.timeline-track {
+  position: relative;
+  padding-left: 24px;
+  border-left: 2px solid #e4e7ed;
+  margin-bottom: 12px;
+}
+
+.tl-node {
+  position: relative;
+}
+
+.tl-dot {
+  position: absolute;
+  left: -33px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #909399;
+}
+
+.tl-success .tl-dot {
+  background: #67c23a;
+}
+.tl-warning .tl-dot {
+  background: #e6a23c;
+}
+.tl-error .tl-dot {
+  background: #f56c6c;
+}
+.tl-info .tl-dot {
+  background: #409eff;
+}
+
+.tl-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.tl-desc {
+  font-size: 13px;
+  color: #606266;
+  margin: 2px 0;
+}
+
+.tl-time {
+  font-size: 12px;
+  color: #909399;
+}
+
+.tl-raw {
+  background: #1f2937;
+  color: #d1fae5;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 240px;
+}
+
+/* ===================== 共享页面骨架（设计系统） ===================== */
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* 页面头部：品牌色 chip + 标题 + 副标题 + 右侧操作 */
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 6px;
+}
+.page-head__chip {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+  box-shadow: var(--sh-md);
+  flex: none;
+}
+.page-head__chip .el-icon {
+  font-size: 25px;
+}
+.page-head__titles {
+  flex: 1;
+  min-width: 0;
+}
+.page-head h2 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink-900);
+}
+.page-head .sub {
+  margin: 5px 0 0;
+  font-size: 13px;
+  color: var(--ink-500);
+  line-height: 1.5;
+}
+.page-head__actions {
+  flex: none;
+  display: flex;
+  gap: 10px;
+}
+
+/* 区块标题（带数量徽标） */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.section-head .count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  padding: 1px 9px;
+  border-radius: 999px;
+}
+
+/* 分组标题里的计数徽章（cat-title 版，市场页通用） */
+.cat-title .count {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  padding: 1px 9px;
+  border-radius: 999px;
+}
+
+/* 筛选条 */
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0 22px;
+}
+
+/* 卡片网格 */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 16px;
+}
+
+/* 轻量徽标（自定义/官方等） */
+.soft-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 9px;
+  border-radius: 999px;
+}
+
+/* 实体 id 徽章（等宽小字）：与中文名称混排时更易辨认，避免塞进副标题挤成一坨 */
+.id-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-500);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+  line-height: 1.5;
+}
+
+/* ===================== 市场页：分类 chips + 空态 + 卡片能力标签 ===================== */
+/* 分类导航 chips：取代分类下拉（一屏看全分类 + 计数，少一次点击） */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 20px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-700);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+.chip:hover {
+  border-color: var(--brand);
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+}
+.chip.is-active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+.chip-n {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-400);
+  font-variant-numeric: tabular-nums;
+}
+.chip:hover .chip-n { color: var(--brand-strong); }
+.chip.is-active .chip-n { color: rgba(255, 255, 255, 0.85); }
+
+/* 筛选条右侧计数提示 */
+.filter-count {
+  margin-left: auto;
+  align-self: center;
+  font-size: 12px;
+  color: var(--ink-400);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 空状态（纯标记实现，避免依赖未注册的全局组件） */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 52px 0 60px;
+  text-align: center;
+}
+.empty-state__icon {
+  font-size: 34px;
+  color: var(--ink-300, #cbd5e1);
+  margin-bottom: 4px;
+}
+.empty-state__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-600);
+}
+.empty-state__hint {
+  font-size: 12.5px;
+  color: var(--ink-400);
+}
+
+/* 卡片内小能力标签行（如技能注入哪些 Agent） */
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--s-3);
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.meta-chip.is-plain {
+  background: var(--surface-2);
+  color: var(--ink-500);
+  border: 1px solid var(--line);
+}
+.meta-chip .el-icon { font-size: 12px; }
+
+/* ===================== 设置页通用骨架（设计系统·统一美化，配套 PageHead/StatStrip） ===================== */
+.settings-page { max-width: 1200px; margin: 0 auto; padding-bottom: 8px; }
+
+/* 卡片块：统一间距 + 轻悬浮微交互（取代各页散落的 .sm-gap/.sc-gap/.ag-gap） */
+.blk {
+  margin-top: 16px;
+  border-radius: var(--r-lg);
+  transition: box-shadow 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.blk:hover { box-shadow: var(--sh-md); }
+
+/* 卡片头：标题 + 副描述（统一 .sm-card-head/.sc-card-head 观感） */
+.blk-head { display: flex; align-items: baseline; gap: 12px; }
+.blk-title { font-size: 14px; font-weight: 600; color: var(--ink-900); }
+.blk-sub { font-weight: 400; font-size: 12px; color: var(--ink-400); }
+
+/* 表单/输入下方小提示 */
+.form-hint { font-size: 12px; color: var(--ink-400); line-height: 1.5; margin-top: 4px; }
+.form-hint code {
+  background: var(--surface-2); border: 1px solid var(--line);
+  padding: 1px 5px; border-radius: 4px; font-size: 11px; color: var(--ink-700);
+}
+
+/* 成功/错误软提示条（取代散落的 .sc-ok/.sc-err，统一语义色） */
+.note-ok {
+  background: var(--brand-soft); border: 1px solid #a7f3d0; color: var(--brand-strong);
+  padding: 8px 12px; border-radius: var(--r-sm); font-size: 12px; margin-top: 8px; line-height: 1.5;
+  word-break: break-all;
+}
+.note-err {
+  background: var(--danger-soft); border: 1px solid #fecaca; color: #b91c1c;
+  padding: 8px 12px; border-radius: var(--r-sm); font-size: 12px; margin-top: 8px; line-height: 1.5;
+}
+
+/* 设置页 StatStrip 与页头间距 */
+.settings-page .stat-strip { margin-top: 16px; }
+
+/* ===================== Element Plus 主题对齐（品牌绿 + 圆角） ===================== */
+:root {
+  --el-color-primary: #0f9d76;
+  --el-color-primary-light-3: #57ba9f;
+  --el-color-primary-light-5: #87ceba;
+  --el-color-primary-light-7: #bde1d6;
+  --el-color-primary-light-8: #d4ebdf;
+  --el-color-primary-light-9: #eaf4e9;
+  --el-color-primary-dark-2: #0c7d5e;
+
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-border-radius-round: 999px;
+}
+
+/* 全局：el-tabs 主色贴合品牌绿 */
+.el-tabs__active-bar {
+  background-color: var(--brand);
+}
+.el-tabs__item.is-active {
+  color: var(--brand-strong);
+}
+.el-tabs__item:hover {
+  color: var(--brand);
+}
+
+.market-tabs {
+  margin: 2px 0;
+}

@@ -1,0 +1,294 @@
+# config/plugins.yaml · 数据源插件注册表（M9-2，M10-P5 六分类 + 教程字段）
+#
+# 接管 config/tools.yaml 的 web_search.provider 单选。
+# 热加载：build_tools 每次重读，改完下一个任务即生效（零重启，mirror model_mapping/agents_library）。
+# 密钥不落本文件，走 .secrets/plugins.env（DS_<ID大写>_API_KEY）；tavily 兼容旧 TAVILY_API_KEY。
+#
+# 状态说明：
+#   connected     = 引擎会真实取数（none-auth 源 / 已配 key 的 api_key 源）
+#   disconnected  = api_key 源但尚未配置密钥 / 已实现但被控制器关闭
+#   coming_soon   = 后端尚未接入可用 Provider（引擎永远跳过，绝不冒充可用）；UI 重解释为
+#                   「待接入后端 / 后端未接入」并给出真实官网与「获取密钥」教程链接（M10-P5）
+# status 由引擎 load_data_sources 按密钥实况重算，此处初值仅作展示默认。
+#
+# M10-P5 新增元数据字段（前端插件市场使用，不进引擎逻辑）：
+#   doc_url       官方站点/文档（真实根域）
+#   key_guide_url 去哪申请/获取 API Key 的控制台或教程页（仅 api_key/oauth 插件，真实根域）
+#   key_env       密钥对应 env 名提示（如 DS_QCC_API_KEY）
+#
+# 分类（M10-P5 收敛为 6）：综合检索 / 学术文献 / 百科知识 / 财经行情 / 企业工商 / 电商数据
+
+plugins:
+# ---- M11：实时天气 / 通用网页（keyless 公开 API，无需密钥；失败即单源降级）----
+# 顺序即优先级：search_many 按本列表顺序聚合结果，而 _run_fc_loop 把结果整段回注模型且**无条数上限**，
+# 排末尾的源会被几十条学术/网页结果淹没（模型读不到，footer 取前 8 条也轮不上）。
+# 故 open_meteo/duckduckgo 置顶，确保天气与通用网页结果排在最前（模型必看、footer 必现）。
+- id: open_meteo
+  name: Open-Meteo 天气
+  icon: ""
+  category: 综合检索
+  description: 实时天气查询（气温/体感/湿度/风速/降水/天气现象，Open-Meteo 公开 API 无需密钥）
+  auth_type: none
+  provider: open_meteo        # M11：真源（tools.data_sources.OpenMeteoProvider，geocoding+forecast）
+  enabled: true
+  status: connected           # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: https://open-meteo.com/
+
+- id: duckduckgo
+  name: DuckDuckGo 网页
+  icon: ""
+  category: 综合检索
+  description: 通用网页检索（DuckDuckGo lite，无需密钥；容器网络出口可达时生效，不可达则单源降级）
+  auth_type: none
+  provider: duckduckgo        # M11：真源（tools.data_sources.DuckDuckGoProvider）
+  enabled: true
+  status: connected           # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: https://duckduckgo.com/
+
+- id: rss_news
+  name: 官方媒体 RSS 新闻
+  icon: ""
+  category: 新闻资讯
+  description: 国内外实时新闻（新华网/人民网/中新网/IT之家 官方 RSS，无需密钥；仅新闻类查询返回，非新闻查询不污染其它检索）
+  auth_type: none
+  provider: rss_news          # 真源（tools.data_sources.RssNewsProvider，多 feed 聚合 + 单 feed 降级）
+  enabled: true
+  status: connected           # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: http://www.people.com.cn/
+
+- id: tavily
+  name: Tavily 搜索
+  icon: ""
+  category: 综合检索
+  description: 实时网络检索，支持学术/新闻/财经源
+  auth_type: api_key
+  provider: tavily
+  enabled: true              # 控制器开关：false → 引擎不取 Tavily
+  status: disconnected       # 运行时重算：有 DS_TAVILY_API_KEY 才 connected
+  builtin: true
+  doc_url: https://tavily.com/
+  key_guide_url: https://app.tavily.com/
+  key_env: DS_TAVILY_API_KEY
+
+- id: arxiv
+  name: arXiv 学术
+  icon: ""
+  category: 学术文献
+  description: 学术论文预印本检索（公开 API，无需密钥）
+  auth_type: none
+  provider: arxiv           # M10-P1：真源（tools.data_sources.ArxivProvider）
+  enabled: true
+  status: connected         # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: https://arxiv.org/
+
+- id: semantic_scholar
+  name: Semantic Scholar
+  icon: ""
+  category: 学术文献
+  description: AI2 学术论文检索，含摘要与引用（匿名池限流 100req/5min）
+  auth_type: none
+  provider: semantic_scholar     # M10-P1：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.semanticscholar.org/
+
+- id: crossref
+  name: CrossRef
+  icon: ""
+  category: 学术文献
+  description: DOI 文献元数据检索（polite pool，无需密钥）
+  auth_type: none
+  provider: crossref        # M10-P1：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.crossref.org/
+
+- id: wikipedia
+  name: 维基百科
+  icon: ""
+  category: 百科知识
+  description: 中文维基百科条目检索（MediaWiki API，无需密钥）
+  auth_type: none
+  provider: wikipedia       # M10-P1：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.wikipedia.org/
+
+- id: openalex
+  name: OpenAlex
+  icon: ""
+  category: 学术文献
+  description: 开放学术图谱，覆盖期刊/预印本/专利（公开 API，无需密钥）
+  auth_type: none
+  provider: openalex          # M10-P2：真源（tools.data_sources.OpenAlexProvider）
+  enabled: true
+  status: connected           # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: https://openalex.org/
+
+- id: europe_pmc
+  name: Europe PMC
+  icon: ""
+  category: 学术文献
+  description: EBI 生物医学/学术文献检索（公开 API，无需密钥）
+  auth_type: none
+  provider: europe_pmc        # M10-P2：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://europepmc.org/
+
+- id: wikidata
+  name: Wikidata
+  icon: ""
+  category: 百科知识
+  description: 维基数据结构化实体检索（MediaWiki API，无需密钥）
+  auth_type: none
+  provider: wikidata          # M10-P2：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.wikidata.org/
+
+- id: tencent_quote
+  name: 腾讯证券行情
+  icon: ""
+  category: 财经行情
+  description: A股/港股/ETF 按名称检索（smartbox 公开端点，无需密钥）
+  auth_type: none
+  provider: tencent_quote     # M10-P2：真源（替代需 OAuth 的雪球）
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://gu.qq.com/
+
+- id: gdelt
+  name: GDELT 全球新闻
+  icon: ""
+  category: 综合检索
+  description: 全球媒体新闻事件检索（doc API，无需密钥）。注意：本机/容器网络出口对该域 TLS 不稳（handshake failure），故默认关闭；网络通畅时可启用。
+  auth_type: none
+  provider: gdelt              # M10-P2 已实现；网络出口 TLS 不稳
+  enabled: false               # → 若启用后连不通会诚实返回空，不冒充 connected
+  status: disconnected
+  builtin: true
+  doc_url: https://www.gdeltproject.org/
+
+- id: xueqiu
+  name: 雪球
+  icon: ""
+  category: 财经行情
+  description: A股/港股行情与讨论。需登录会话 Cookie（OAuth），非标准 API Key；后端 Provider 待接入。
+  auth_type: oauth           # Cookie/OAuth，暂未接
+  provider: coming_soon
+  enabled: false
+  status: coming_soon
+  builtin: true
+  doc_url: https://xueqiu.com/
+  key_guide_url: https://xueqiu.com/
+
+- id: cninfo
+  name: 巨潮资讯
+  icon: ""
+  category: 财经行情
+  description: 上市公司公告与财报。后端 Provider 待接入（公开端点，无需密钥）。
+  auth_type: none
+  provider: coming_soon
+  enabled: false
+  status: coming_soon
+  builtin: true
+  doc_url: https://www.cninfo.com.cn/
+
+- id: qcc
+  name: 企查查
+  icon: ""
+  category: 企业工商
+  description: 工商信息与企业股权穿透。需 API Key（企查查开放平台）；后端 Provider 待接入，配置密钥后待实现即可生效。
+  auth_type: api_key
+  provider: coming_soon
+  enabled: false
+  status: coming_soon
+  builtin: true
+  doc_url: https://www.qcc.com/
+  key_guide_url: https://www.qcc.com/open
+  key_env: DS_QCC_API_KEY
+
+- id: scholar
+  name: Google Scholar
+  icon: ""
+  category: 学术文献
+  description: 学术引用检索。无官方公开 API，后端 Provider 待接入。
+  auth_type: none
+  provider: coming_soon
+  enabled: false
+  status: coming_soon
+  builtin: true
+  doc_url: https://scholar.google.com/
+
+  # ---- M10-P3：电商 / 电商竞品分析（全部 keyless 真源，DESIGN_M10-P3.md §6b.5）----
+- id: taobao_suggest
+  name: 淘宝联想词
+  icon: ""
+  category: 电商数据
+  description: 淘宝搜索联想词与热度（国内电商竞品关键词，公开端点，无需密钥）
+  auth_type: none
+  provider: taobao_suggest     # M10-P3：真源（tools.data_sources.TaobaoSuggestProvider）
+  enabled: true
+  status: connected            # 运行时重算：auth=none → connected
+  builtin: true
+  doc_url: https://www.taobao.com/
+
+- id: amazon_suggest
+  name: Amazon 联想词
+  icon: ""
+  category: 电商数据
+  description: Amazon(US) 搜索补全关键词（跨境竞品关键词，公开端点，无需密钥）
+  auth_type: none
+  provider: amazon_suggest     # M10-P3：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.amazon.com/
+
+- id: ebay_suggest
+  name: eBay 联想词
+  icon: ""
+  category: 电商数据
+  description: eBay 搜索联想关键词（跨境竞品关键词，公开端点，无需密钥）
+  auth_type: none
+  provider: ebay_suggest       # M10-P3：真源
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.ebay.com/
+
+- id: accio_tariff
+  name: Accio 关税查询
+  icon: ""
+  category: 电商数据
+  description: HS 编码 + 关税税率/落地成本查询（跨境电商成本结构，公开端点，无需密钥）
+  auth_type: none
+  provider: accio_tariff       # M10-P3：真源（Accio/阿里公开 API，失败即单源降级）
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.accio.com/
+
+- id: hs_code_tariff
+  name: HS 码关税明细
+  icon: ""
+  category: 电商数据
+  description: 已知 HS 码 → 六国关税（AU/CA/DE/EU/GB/US）+ 301/反倾销风险标记（无需密钥）
+  auth_type: none
+  provider: hs_code_tariff     # M10-P4：真源（Accio 公开计算器前端 API，仅精确码查询）
+  enabled: true
+  status: connected
+  builtin: true
+  doc_url: https://www.accio.com/

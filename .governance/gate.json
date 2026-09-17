@@ -1,0 +1,20 @@
+{
+  "checks": [
+    "cd E:/第二电脑/report-agent-team && C:/Users/sfkj/.workbuddy/binaries/python/versions/3.13.12/python.exe -m pytest tests/test_converge_check.py -q"
+  ],
+  "timeout": 120,
+  "verify_file": "VERIFICATION.md",
+  "min_verify_bytes": 200,
+  "review_file": "REVIEW.md",
+  "min_review_bytes": 200,
+  "review_mode": "independent",
+  "require_on_changes": true,
+  "converge": {
+    "enabled": true,
+    "script": "scripts/converge_gate.py",
+    "blocking_on": [
+      "coverage",
+      "broken_reference"
+    ]
+  }
+}

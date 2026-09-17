@@ -1,0 +1,26 @@
+# TD-006 .dockerignore · 避免 COPY . . 把噪声塞进镜像（D6）
+# 版本控制与文档（无需进镜像）
+.git
+.gitignore
+.github
+*.md
+
+# 依赖与构建产物
+node_modules
+web/node_modules
+dist
+web/dist
+.vite
+
+# 运行时状态与输出
+.engine_state
+outputs
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+*.tsbuildinfo
+
+# 密钥与本地配置（绝不进镜像）
+.env
+.env.example
