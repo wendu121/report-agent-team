@@ -29,9 +29,23 @@
     <el-card class="block" shadow="never">
       <template #header>
         <span class="card-title">研报正文</span>
-        <el-button class="card-action" type="primary" plain size="small" :loading="downloading" @click="onDownload">
-          下载审计包 (ZIP)
-        </el-button>
+        <div class="card-action">
+          <el-button-group class="format-group">
+            <el-button
+              v-for="f in formatOptions"
+              :key="f.value"
+              size="small"
+              :type="f.value === 'md' ? 'primary' : 'default'"
+              :loading="downloadingFormat === f.value"
+              @click="onDownloadReport(f.value)"
+            >
+              {{ f.label }}
+            </el-button>
+          </el-button-group>
+          <el-button type="primary" plain size="small" :loading="downloading" @click="onDownload">
+            下载审计包 (ZIP)
+          </el-button>
+        </div>
       </template>
       <div class="markdown-body" v-html="sanitizedHtml" />
     </el-card>
@@ -76,7 +90,12 @@ import { storeToRefs } from 'pinia';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { useTaskStore } from '@/stores/task';
-import { downloadAuditPackage } from '@/utils/download';
+import {
+  downloadAuditPackage,
+  downloadReport,
+  REPORT_FORMAT_OPTIONS,
+  type ReportFormat,
+} from '@/utils/download';
 import { formatTime } from '@/utils/formatter';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 import type { GateDecision } from '@/types';
@@ -88,6 +107,9 @@ const { currentTask: task, status, error } = storeToRefs(taskStore);
 
 const taskId = computed(() => route.params.taskId as string);
 const downloading = ref(false);
+// 四格式下载：独立 loading 态，避免点 PDF 时四个按钮一起转圈
+const downloadingFormat = ref<ReportFormat | null>(null);
+const formatOptions = REPORT_FORMAT_OPTIONS;
 
 const gateHistory = computed(() => task.value?.routing_state.gate_review_history ?? []);
 
@@ -143,6 +165,18 @@ async function onDownload(): Promise<void> {
     taskStore.setError(e instanceof Error ? e.message : '下载失败');
   } finally {
     downloading.value = false;
+  }
+}
+
+async function onDownloadReport(fmt: ReportFormat): Promise<void> {
+  downloadingFormat.value = fmt;
+  try {
+    await downloadReport(taskId.value, fmt);
+  } catch (e) {
+    // 后端 503 RENDERER_UNAVAILABLE / 409 未完成等文案已由 download.ts 规整，原样透出
+    taskStore.setError(e instanceof Error ? e.message : '下载失败');
+  } finally {
+    downloadingFormat.value = null;
   }
 }
 

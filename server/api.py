@@ -49,6 +49,14 @@ state_store = EngineStateStore(STATE_DIR)
 # 故事件经 JSONL 文件转交：子进程写 → 服务进程并发 tail → manager.broadcast。
 from .websocket import manager as _ws_manager
 
+# 输出渲染（DESIGN_OUTPUT_RENDERING.md v1.0）：doc_render 在渲染函数内部惰性 import
+# 文档库（python-docx / python-pptx / reportlab），故此处顶层导入不会让容器因缺库而启动失败。
+from urllib.parse import quote
+from .audit_export import AuditExportGenerator
+from tools.doc_render import (  # noqa: E402
+    RendererUnavailable, parse_markdown, render_docx, render_pdf, render_pptx,
+)
+
 
 async def _stream_engine_events(task_id: str, events_file: Path):
     """并发 tail 引擎事件 JSONL，逐条广播到 WS（TD-002 实时时间线）。
@@ -864,25 +872,109 @@ async def export_audit(task_id: str):
             ).dict()
         )
 
-    # TODO: M6-5 生成真实 ZIP 包
-    # 临时返回 JSON 响应
-    audit_data = {
-        "task_id": task_id,
-        "status": task.status.value,
-        "report_markdown": task.report_markdown or "待生成",
-        "gate_review_history": [g.dict() for g in task.routing_state.gate_review_history],
-        "prior_versions": task.prior_versions,
-        "user_task": task.user_task.dict(),
-        "engine_events": [e.dict() for e in task.routing_state.engine_events],
-        "note": "M6-5 待实现：真实 ZIP 打包"
-    }
+    # M6-5 真实 ZIP：生成器按 DB 模型写，端点手里是 TaskResponse →
+    # 经 AuditExportGenerator.from_api_task() 做形状适配（见 server/audit_export.py）。
+    generator = AuditExportGenerator.from_api_task(task)
+    zip_data = generator.generate_zip()
 
-    # 临时返回 JSON（M6-5 会替换为 ZIP）
-    return {
-        "message": "审计包待 M6-5 实现",
-        "task_id": task_id,
-        "audit_data": audit_data
-    }
+    return Response(
+        content=zip_data,
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(generator.get_filename())},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 研报下载（DESIGN_OUTPUT_RENDERING.md v1.0 · OR-3）
+# ---------------------------------------------------------------------------
+# 设计要点：
+#   - SoT 仍是 report_markdown；docx/pptx/pdf 是**下载时才渲染**的派生视图，引擎零改动。
+#   - 渲染库缺失必须 503 响亮失败，绝不返回空文件冒充成功（诚实边界）。
+_REPORT_FORMATS = {
+    "md": "text/markdown; charset=utf-8",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "pdf": "application/pdf",
+}
+_REPORT_RENDERERS = {"docx": render_docx, "pptx": render_pptx, "pdf": render_pdf}
+
+
+def _md_title(md: str, fallback: str) -> str:
+    """取 md 首个 # 标题作文档标题，取不到则用主题兜底。"""
+    m = re.search(r"^#\s+(.+)$", md or "", re.MULTILINE)
+    return (m.group(1).strip() if m else "") or fallback
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 5987：ASCII 兜底名 + UTF-8 编码名（中文主题不乱码）。"""
+    ascii_name = re.sub(r"[^\w.-]+", "_", filename, flags=re.ASCII) or "report"
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(filename)}'
+
+
+@router.get(
+    "/tasks/{task_id}/report",
+    responses={200: {"description": "研报文件（md / docx / pptx / pdf）"}},
+)
+async def download_report(task_id: str, format: str = "md"):
+    """研报下载（GET /tasks/{id}/report?format=md|docx|pptx|pdf）
+
+    - 越权一律 404（_owned_task 按 owner 隔离，不返 403 防枚举探测）；
+    - 仅 done/escalated 可下载，否则 409 TASK_NOT_COMPLETED；
+    - 格式非法 400 UNSUPPORTED_FORMAT；渲染库缺失 503 RENDERER_UNAVAILABLE。
+    """
+    task = _owned_task(task_id)
+
+    if task.status not in [TaskStatus.DONE, TaskStatus.ESCALATED]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ErrorResponse(
+                error="TASK_NOT_COMPLETED",
+                message="任务未完成",
+                timestamp=datetime.utcnow().isoformat(),
+            ).dict(),
+        )
+
+    fmt = (format or "md").lower().strip()
+    if fmt not in _REPORT_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ErrorResponse(
+                error="UNSUPPORTED_FORMAT",
+                message=f"不支持的格式：{format}（可选 md / docx / pptx / pdf）",
+                timestamp=datetime.utcnow().isoformat(),
+            ).dict(),
+        )
+
+    md = task.report_markdown or ""
+    topic = getattr(task.user_task, "topic", None) or "report"
+
+    if fmt == "md":
+        data = md.encode("utf-8")
+    else:
+        meta = {
+            "title": _md_title(md, topic),
+            "topic": topic,
+            "task_id": task_id,
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        }
+        try:
+            data = _REPORT_RENDERERS[fmt](parse_markdown(md), meta)
+        except RendererUnavailable as e:
+            # 缺库即如实报 503，绝不返回空字节冒充成功
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=ErrorResponse(
+                    error="RENDERER_UNAVAILABLE",
+                    message=str(e),
+                    timestamp=datetime.utcnow().isoformat(),
+                ).dict(),
+            )
+
+    return Response(
+        content=data,
+        media_type=_REPORT_FORMATS[fmt],
+        headers={"Content-Disposition": _content_disposition(f"{topic}-{task_id}.{fmt}")},
+    )
 
 
 # 旧「调试用」list_tasks（返回全进程任务、不按 owner 过滤）已移除：

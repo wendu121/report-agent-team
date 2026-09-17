@@ -217,7 +217,8 @@ sequenceDiagram
   ├── gate_review_history.json          # 完整 gate 审计链路
   ├── prior_versions.json                # 产出快照（每轮）
   ├── user_task.json                     # 原始任务
-  └── engine_events.json                 # 引擎层事件留痕
+  ├── engine_events.json                 # 引擎层事件留痕
+  └── metadata.json                      # 审计包元数据（task_id/status/时间戳/各段计数）
   ```
 
 **业务规则**：
@@ -228,6 +229,49 @@ sequenceDiagram
 **错误响应**：
 - 404 Not Found：任务不存在；
 - 409 Conflict：任务未完成（`status=running`）。
+
+---
+
+### 2.5 研报下载（md / docx / pptx / pdf）
+
+> 设计来源：`DESIGN_OUTPUT_RENDERING.md v1.0`
+> 原则：**`report_markdown` 是唯一事实源**，docx/pptx/pdf 均为**下载时才渲染**的派生视图，
+> 引擎（Writer / ToolBundle）零改动。
+
+**接口**：`GET /tasks/{task_id}/report?format=md|docx|pptx|pdf`
+
+**查询参数**：
+| 参数 | 取值 | 默认 | 说明 |
+|------|------|------|------|
+| `format` | `md` / `docx` / `pptx` / `pdf` | `md` | 其他值一律 400 |
+
+**响应体**（200 OK，二进制文件）：
+| format | Content-Type |
+|--------|--------------|
+| `md` | `text/markdown; charset=utf-8` |
+| `docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+| `pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` |
+| `pdf` | `application/pdf` |
+
+- `Content-Disposition: attachment; filename="{ascii}"; filename*=UTF-8''{urlencoded}`
+  （RFC 5987 双名，中文主题不乱码）；文件名格式 `{topic}-{task_id}.{ext}`。
+- 渲染映射（详见设计文档 §4）：封面 + 每个 `##` 章节一页 + 每页 ≤6 要点（超限续页「（续）」）
+  + 引用页每页 ≤10 条 + 管道表独立成表。PDF 使用 reportlab 内置 `UnicodeCIDFont('STSong-Light')`
+  输出中文（默认 Helvetica 不含 CJK，会导致黑块）。
+
+**业务规则**：
+- 仅在 `status=done | escalated` 时可用；
+- `md` 直接回 `report_markdown`；其余三格式由 `tools/doc_render.py` 从 md 渲染；
+- 渲染库缺失（容器未装 python-docx / python-pptx / reportlab）**必须响亮失败**，
+  绝不返回空文件冒充成功（诚实边界）。
+
+**错误响应**：
+| 状态码 | error | 触发条件 |
+|--------|-------|---------|
+| 404 | `TASK_NOT_FOUND` | 任务不存在或越权（按 owner 隔离，不返 403 防枚举探测） |
+| 409 | `TASK_NOT_COMPLETED` | 任务未完成（`status=running`） |
+| 400 | `UNSUPPORTED_FORMAT` | `format` 不在四者之内 |
+| 503 | `RENDERER_UNAVAILABLE` | 渲染库缺失，`message` 指明缺哪个库 |
 
 ---
 

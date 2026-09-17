@@ -33,3 +33,9 @@ export async function submitReview(taskId: string, action: ReviewAction): Promis
 export function auditExportUrl(taskId: string): string {
   return `/api/v1/tasks/${encodeURIComponent(taskId)}/audit-export`;
 }
+
+// 研报下载 URL（DESIGN_OUTPUT_RENDERING.md v1.0）
+// format = md | docx | pptx | pdf；后端按格式渲染（md 为原样，其余按需派生）
+export function reportDownloadUrl(taskId: string, format: string): string {
+  return `/api/v1/tasks/${encodeURIComponent(taskId)}/report?format=${encodeURIComponent(format)}`;
+}
