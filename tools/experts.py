@@ -518,7 +518,14 @@ def _write_package(proposal: Dict[str, Any]) -> Dict[str, Any]:
         f"# 注意事项\n仅基于可靠来源作答；不确定时明确说明，不编造。\n"
     )
     (root / "agents" / f"{eid}.md").write_text(md, encoding="utf-8")
-    return {"package_dir": str(root.relative_to(BASE)), "plugin": plugin}
+    # 相对**租户根**而非写死的 BASE：多租户改造后资源根由 tenancy 解析，
+    # TENANTS_ROOT 指向别处时 relative_to(BASE) 会 ValueError（与 skill_importer._backup 同源）。
+    # 兜底：不在租户根下就退回绝对路径，绝不让「算相对路径」把审批流程搞崩。
+    try:
+        pkg_dir = str(root.relative_to(_root()))
+    except ValueError:
+        pkg_dir = str(root)
+    return {"package_dir": pkg_dir, "plugin": plugin}
 
 
 def accept_expert_proposal(pid: str, operator: str = "system") -> Dict[str, Any]:

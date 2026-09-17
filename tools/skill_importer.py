@@ -668,7 +668,13 @@ def _backup() -> Optional[str]:
     dest = _backup_dir() / stamp
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "skills.yaml").write_text(_skills_yaml().read_text(encoding="utf-8"), encoding="utf-8")
-    return str(dest.relative_to(BASE))
+    # 必须相对**租户根**而非写死的模块常量 BASE：多租户改造后资源根由 tenancy 解析，
+    # 当 TENANTS_ROOT 指向别处（容器挂载 / 测试隔离）时 relative_to(BASE) 会 ValueError。
+    # 兜底：万一确实不在租户根下，退回绝对路径，绝不因「算相对路径」让回滚失败。
+    try:
+        return str(dest.relative_to(_tenant_root()))
+    except ValueError:
+        return str(dest)
 
 
 def _existing_index(data) -> Dict[str, Any]:

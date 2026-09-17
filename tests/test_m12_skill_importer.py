@@ -23,19 +23,22 @@ def tmp_paths(tmp_path, monkeypatch):
     cfg = tmp_path / "config"
     cfg.mkdir()
     audit = tmp_path / ".audit"
-    monkeypatch.setattr(si, "BASE", tmp_path)
-    monkeypatch.setattr(si, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(si, "SKILLS_PATH", cfg / "skills.yaml")
-    monkeypatch.setattr(si, "SKILLS_DIR", tmp_path / "skills")
-    monkeypatch.setattr(si, "AUDIT_DIR", audit)
-    monkeypatch.setattr(si, "PROPOSAL_DIR", audit / "skill_proposals")
-    monkeypatch.setattr(si, "BACKUP_DIR", audit / "skill_backups")
-    monkeypatch.setattr(si, "IMPORT_LOG", audit / "skill_imports.jsonl")
-    monkeypatch.setattr(si, "ALLOWLIST_PATH", cfg / "skill_import_allowlist.yaml")
+    # 多租户改造后路径解析改走**惰性函数**（旧模块级常量已删除），
+    # monkeypatch 必须打在函数上：打常量要么 AttributeError，要么改了个寂寞
+    # （常量还在但已无人消费，真实解析走 tenancy）。
+    monkeypatch.setattr(si, "_tenant_root", lambda: tmp_path)
+    monkeypatch.setattr(si, "_config_dir", lambda: cfg)
+    monkeypatch.setattr(si, "_skills_yaml", lambda: cfg / "skills.yaml")
+    monkeypatch.setattr(si, "_skills_dir", lambda: tmp_path / "skills")
+    monkeypatch.setattr(si, "_audit_dir", lambda: audit)
+    monkeypatch.setattr(si, "_proposal_dir", lambda: audit / "skill_proposals")
+    monkeypatch.setattr(si, "_backup_dir", lambda: audit / "skill_backups")
+    monkeypatch.setattr(si, "_import_log", lambda: audit / "skill_imports.jsonl")
+    monkeypatch.setattr(si, "_allowlist_path", lambda: cfg / "skill_import_allowlist.yaml")
     # 让引擎层 build_skill_context 也读 tmp（V1 真实可读验证）
-    monkeypatch.setattr(sk, "BASE", tmp_path)
-    monkeypatch.setattr(sk, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(sk, "SKILLS_PATH", cfg / "skills.yaml")
+    monkeypatch.setattr(sk, "_tenant_root", lambda: tmp_path)
+    monkeypatch.setattr(sk, "_config_dir", lambda: cfg)
+    monkeypatch.setattr(sk, "_skills_dir", lambda: tmp_path / "skills")
     return tmp_path
 
 
@@ -230,7 +233,7 @@ def test_malformed_id_path_traversal_blocked(tmp_paths):
     # 注意用 resolve()：is_relative_to 是词法的，对 ../../ 会假通过
     for evil in ("../../evil", "../evil", "a/../../b", "..\\..\\evil"):
         p = si._proposal_path(evil)
-        assert p.resolve().is_relative_to(si.PROPOSAL_DIR.resolve()), \
+        assert p.resolve().is_relative_to(si._proposal_dir().resolve()), \
             f"{evil} 逃出提案目录: {p}"
     # 真实越界读验证：在 BASE 根放陷阱文件，get_proposal('../../escaped') 不应读到它
     trap = tmp_paths / "escaped.json"

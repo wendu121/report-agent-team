@@ -84,3 +84,9 @@ config/reflections.proposed.yaml
 # T44 聊天体受限沙箱工作目录（运行时生成，绝不入库）
 .chat_sandbox/
 
+# 多租户资源根（每账号 config/experts/.audit 落盘，运行时生成；误入库会污染历史且含配置快照）
+/tenants/
+
+# 本地 pytest 临时根（PYTEST_DEBUG_TEMPROOT 指向它，避免系统 Temp 下上万残留触发批量删除拦截）
+.pytest_tmp/
+
