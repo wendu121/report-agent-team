@@ -96,6 +96,71 @@ class ReportState(TypedDict, total=False):
 # ----------------------------------------------------------------------------
 # LLM 适配器
 # ----------------------------------------------------------------------------
+def estimate_tokens(text: str) -> int:
+    """通用近似 token 计数（不绑定特定模型 tokenizer，中英文混合稳健）。
+
+    用于输入预算闸：new-api 网关背后模型上下文窗口各异，超窗即 400
+    `input length too long`。精确计数需各模型 tokenizer（本地无），故用启发式：
+      - CJK（中日韩统一表意 + 全角符号）~1.6 token/字；
+      - 拉丁词（连续 [A-Za-z0-9]）~0.25 token/词；
+      - 其余字符 ~0.3 token/字符。
+    误差对「是否超窗」判断足够，且下方 complete() 还有 input-too-long 自愈兜底。
+    """
+    if not text:
+        return 0
+    cjk = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]", text))
+    latin_words = len(re.findall(r"[A-Za-z0-9]+", text))
+    latin_chars = len(re.findall(r"[A-Za-z0-9]", text))
+    other = len(text) - cjk - latin_chars
+    return int(cjk * 1.6 + other * 0.3 + latin_words * 0.25) + 1
+
+
+def _trunc_keep_tail(text: str, max_tokens: int) -> str:
+    """按 token 近似从**头部**裁，保留尾部（最近轮对话 / 最近一次工具结果）。
+
+    对话历史/工具结果累积在 user blob 前部，最新内容在尾部——丢旧保新。
+    """
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    ratio = max(0.0, max_tokens) / max(1, estimate_tokens(text))
+    keep = max(0, int(len(text) * ratio))
+    return text[-keep:] + "\n…[已截断以适配上下文窗口]"
+
+
+def fit_input_budget(system: str, user: str, max_input_tokens: int) -> tuple:
+    """把 system+user 裁到 max_input_tokens 以内（防 400）。
+
+    顺序：① 优先裁 user（含历史/工具结果，可丢旧保新）；② 仍超限再裁 system
+    （保留头部指令）。返回 (system, user)。与具体模型/网关无关 → 通用 OpenAI 兼容。
+    """
+    sys_t = estimate_tokens(system)
+    usr_t = estimate_tokens(user)
+    if sys_t + usr_t <= max_input_tokens:
+        return system, user
+    usr_budget = max(0, max_input_tokens - sys_t)
+    # 以 user 自身是否超预算为准裁 user（不依赖 system 是否非空）。
+    # 旧实现用 `usr_budget < max_input_tokens`（等价于 sys_t>0）作门，system 为空时漏裁 → 400 无法自愈。
+    if usr_t > usr_budget:
+        user = _trunc_keep_tail(user, usr_budget)
+    if sys_t > max_input_tokens:  # system 本身超限，裁 system（保头部）
+        sys_budget = max(1, max_input_tokens)
+        system = system[: max(0, int(len(system) * (sys_budget / max(1, sys_t))))] \
+            + "\n…[system 已截断]"
+    return system, user
+
+
+# new-api 等网关对超窗的报错形态不一，统一识别「输入超上下文窗口」类错误以便自愈重试。
+_INPUT_TOO_LONG_RE = re.compile(
+    r"input length|context length|too (long|many) token|maximum context|"
+    r"exceed.*context|context.*exceed|prompt is too long|token.*exceed",
+    re.I,
+)
+
+
+def _is_input_too_long(exc: Exception) -> bool:
+    return bool(_INPUT_TOO_LONG_RE.search(str(exc)))
+
+
 class LLMClient:
     """所有 LLM 调用经此接口；具体实现可替换（new-api 网关 / 离线 stub）。"""
 
@@ -378,6 +443,8 @@ class NewApiLLMClient(LLMClient):
         default_endpoint_id: Optional[str] = None,
         max_retries: int = 2,
         timeout: int = 120,
+        max_input_tokens: int = 128000,
+        reserved_output_tokens: int = 4096,
     ):
         self._endpoints = {e["id"]: e for e in (endpoints or [])}
         self._interfaces = {i["id"]: i for i in (interfaces or [])}
@@ -385,6 +452,12 @@ class NewApiLLMClient(LLMClient):
         self._clients: Dict[str, Any] = {}   # endpoint_id -> OpenAI client cache
         self._max_retries = max_retries
         self._timeout = timeout
+        # 输入预算闸：单次请求输入 token 上限（模型上下文窗口 - 预留输出）。
+        # 默认 128k 为通用安全值；若网关背后模型窗口更小，下方 complete() 的
+        # input-too-long 自愈会把预算逐级减半重试，无需先知窗口大小即通用可用。
+        # 可通过 models.yaml defaults.max_input_tokens 或 LLM_MAX_INPUT_TOKENS 覆盖。
+        self._max_input_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", max_input_tokens))
+        self._reserved_output_tokens = reserved_output_tokens
 
     def _resolve(self, model: str) -> Tuple[str, str, Dict[str, Any]]:
         """解析 model（interface id 或 raw model_id）→ (endpoint_id, real_model_id, endpoint_cfg)。
@@ -482,14 +555,25 @@ class NewApiLLMClient(LLMClient):
         last: Exception | None = None
         healed = False
         logger = logging.getLogger(__name__)
-        for attempt in range(self._max_retries + 1):
+        factor = 1.0  # 输入预算因子：遇 input-too-long 逐级减半自愈（通用，无需先知窗口）
+        halvings = 0
+        # 超窗减半走**独立且有界**的预算（最多 3 次：1.0→0.5→0.25→0.125，且 1/8 真会被发出）。
+        # 绝不放大通用重试次数——那会破坏「自愈有界、持续报错必须最终失败」的语义：
+        # 曾把总次数无脑放宽到 >=4，导致 test_heal_bounded_to_once 由绿转红（fake 第 4 次返回成功，不再抛错）。
+        _MAX_HALVINGS = 3
+        attempt = 0
+        while attempt <= self._max_retries + halvings:
+            attempt += 1
+            cur_max = max(1, int(self._max_input_tokens * factor))
+            budget = max(1, cur_max - self._reserved_output_tokens)  # 防 reserved>上限致负预算
+            sys_t, usr_t = fit_input_budget(system, user, budget)
             params = {k: v for k, v in body.items() if k.lower() not in drop}
             try:
                 resp = client.chat.completions.create(
                     model=real_model,
                     messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "system", "content": sys_t},
+                        {"role": "user", "content": usr_t},
                     ],
                     timeout=self._timeout,
                     **params,
@@ -501,6 +585,15 @@ class NewApiLLMClient(LLMClient):
             except Exception as e:  # 网络/限流/超时统一转 LLMError 并重试
                 last = e
                 msg = str(e)
+                # 输入超上下文窗口：减半预算重裁重试（factor 最低 0.125，即 1/8），
+                # 不依赖具体模型窗口大小即通用可用（new-api 背后 26+ 通道窗口各异）。
+                if _is_input_too_long(e) and halvings < _MAX_HALVINGS:
+                    factor *= 0.5
+                    halvings += 1
+                    logger.warning(
+                        "LLM 输入超上下文窗口，已减半输入预算重试（factor=%.3f，第%d次减半，模型=%s 端点=%s）：%s",
+                        factor, halvings, real_model, endpoint_id, msg[:160])
+                    continue
                 # 自愈须**先于** _is_non_retryable 判定：400 类报错若先走黑名单/穷举路径，
                 # 这段就有可能成为永远执行不到的死代码（哪怕当前 pattern 未覆盖 400 也要显式保序）。
                 if (not healed and _UNSUPPORTED_PARAM_RE.search(msg)
@@ -516,8 +609,8 @@ class NewApiLLMClient(LLMClient):
                 # 配额耗尽 / 鉴权 / 模型不存在：重试无用（且配额型会烧额度）→ 立即放弃
                 if _is_non_retryable(e):
                     raise LLMError(f"LLM 调用失败(不可重试，须换通道或修配置): {e}") from e
-                if attempt < self._max_retries:
-                    time.sleep(2 ** attempt)  # 退避 2s, 4s...
+                if attempt <= self._max_retries:  # attempt 已在循环顶部自增，等价于原 attempt < max_retries
+                    time.sleep(2 ** (attempt - 1))  # 退避
                     continue
         raise LLMError(f"LLM 调用失败(已重试 {self._max_retries} 次): {last}") from last
 
@@ -535,14 +628,23 @@ class NewApiLLMClient(LLMClient):
         last: Exception | None = None
         healed = False
         logger = logging.getLogger(__name__)
-        for attempt in range(self._max_retries + 1):
+        factor = 1.0  # 输入预算因子：遇 input-too-long 逐级减半自愈
+        halvings = 0
+        # 同 complete()：减半走独立有界预算，绝不放大通用重试次数。
+        _MAX_HALVINGS = 3
+        attempt = 0
+        while attempt <= self._max_retries + halvings:
+            attempt += 1
+            cur_max = max(1, int(self._max_input_tokens * factor))
+            budget = max(1, cur_max - self._reserved_output_tokens)  # 防 reserved>上限致负预算
+            sys_t, usr_t = fit_input_budget(system, user, budget)
             params = {k: v for k, v in body.items() if k.lower() not in drop}
             try:
                 resp = client.chat.completions.create(
                     model=real_model,
                     messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "system", "content": sys_t},
+                        {"role": "user", "content": usr_t},
                     ],
                     timeout=self._timeout,
                     **params,
@@ -552,6 +654,15 @@ class NewApiLLMClient(LLMClient):
             except Exception as e:
                 last = e
                 msg = str(e)
+                # 输入超上下文窗口：减半预算重试（tools/tool_choice 绝不裁——那是把有工具
+                # 依据的调用降成凭空作答，等同制造幻觉；只裁 system/user 文本）。
+                if _is_input_too_long(e) and halvings < _MAX_HALVINGS:
+                    factor *= 0.5
+                    halvings += 1
+                    logger.warning(
+                        "LLM 工具调用输入超上下文窗口，已减半输入预算重试（factor=%.3f，第%d次减半，模型=%s 端点=%s）：%s",
+                        factor, halvings, real_model, endpoint_id, msg[:160])
+                    continue
                 # 同 complete()：自愈先于黑名单判定；且**绝不自动剔除 tools/tool_choice**
                 # （那是把有工具依据的调用悄悄降成凭空作答，等同制造幻觉）。
                 if (not healed and _UNSUPPORTED_PARAM_RE.search(msg)
@@ -565,8 +676,8 @@ class NewApiLLMClient(LLMClient):
                     continue
                 if _is_non_retryable(e):
                     raise LLMError(f"LLM 工具调用失败(不可重试): {e}") from e
-                if attempt < self._max_retries:
-                    time.sleep(2 ** attempt)
+                if attempt <= self._max_retries:  # attempt 已在顶部自增，等价于原 attempt < max_retries
+                    time.sleep(2 ** (attempt - 1))
                     continue
         raise LLMError(f"LLM 工具调用失败(已重试 {self._max_retries} 次): {last}") from last
 
