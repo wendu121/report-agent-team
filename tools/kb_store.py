@@ -10,6 +10,7 @@
 依赖：asyncpg（api 镜像已含 0.31.0）。模块级仅用标准库，导入零副作用。
 """
 import os
+import re
 import json
 import hashlib
 import logging
@@ -31,6 +32,9 @@ EMBED_KEY = os.getenv("NEWAPI_API_KEY", "sk-no-key")
 # 换模型务必同步改 EMBEDDING_MODEL + EMBEDDING_DIM（维度写死在表结构里，不一致会写失败降级）。
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 EMBED_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+# 可选：把输出维度显式透传给 provider（如智谱 embedding-3 支持 dimensions=1024，
+# 从而与既有 vector(1024) 列对齐）。留空则不传，走 provider 默认维度。
+EMBED_DIMENSIONS = os.getenv("EMBEDDING_DIMENSIONS", "").strip()
 
 
 def _db_dsn() -> str:
@@ -50,7 +54,13 @@ def embed(texts):
     """批量嵌入（OpenAI 兼容）。失败返回 None，由调用方降级。"""
     if not texts:
         return []
-    payload = json.dumps({"model": EMBED_MODEL, "input": texts}).encode("utf-8")
+    body: dict = {"model": EMBED_MODEL, "input": texts}
+    if EMBED_DIMENSIONS:
+        try:
+            body["dimensions"] = int(EMBED_DIMENSIONS)
+        except ValueError:
+            logger.warning("EMBEDDING_DIMENSIONS=%r 非整数，已忽略", EMBED_DIMENSIONS)
+    payload = json.dumps(body).encode("utf-8")
     req = _req.Request(
         EMBED_URL,
         data=payload,
@@ -85,8 +95,88 @@ def _row_to_dict(r) -> dict:
     }
 
 
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+_WORD = re.compile(r"[0-9a-zA-Z_]+")
+# 高频虚词碎片，做最小停用（保守，只滤明显噪声，避免误伤实体词）
+_STOP = {"的", "了", "吗", "呢", "啊", "是", "我", "你", "他", "她", "它",
+         "在", "和", "与", "就", "都", "也", "有", "把", "被", "之",
+         "什么", "怎么", "如何", "这个", "那个", "一下", "可以", "以及", "因为", "所以"}
+_MAX_TOKENS = 24
+
+
+def _tokenize(text: str) -> list[str]:
+    """轻量分词：拉丁词（>=2 小写）+ 中文 bigram。
+
+    仅用于「嵌入不可用」时的关键词召回——零第三方依赖、确定性、可离线。
+    中文无空格，故用 bigram 近似（"跨境电商" → 跨境/境电/电商）。
+    """
+    text = text or ""
+    toks: list[str] = []
+    for w in _WORD.findall(text.lower()):
+        if len(w) >= 2 and w not in _STOP:
+            toks.append(w)
+    for run in _CJK_RUN.findall(text):
+        if run in _STOP:
+            continue
+        if len(run) <= 2:
+            toks.append(run)
+        else:
+            for i in range(len(run) - 1):
+                bg = run[i:i + 2]
+                if bg not in _STOP:
+                    toks.append(bg)
+    seen: set = set()
+    out: list[str] = []
+    for t in toks:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+async def _lexical_retrieve(conn, query: str, k: int) -> list:
+    """无向量时的关键词召回：任一 token 命中即候选，按命中 token 数排序。
+
+    替代原实现 `content ILIKE '%整句%'`——对自然语言查询几乎必然 0 命中，
+    使记忆层在嵌入端点不可用时表现为「完全失忆」。
+    """
+    toks = _tokenize(query)[:_MAX_TOKENS]
+    if not toks:
+        return []
+    clauses: list[str] = []
+    params: list = []
+    for t in toks:
+        idx = len(params) + 1
+        clauses.append(f"(content ILIKE ${idx} OR coalesce(title,'') ILIKE ${idx})")
+        params.append(f"%{t}%")
+    sql = (
+        "SELECT id, kind, title, content, source, metadata, 0.0 AS score "
+        "FROM kb.entries WHERE " + " OR ".join(clauses) +
+        " ORDER BY created_at DESC LIMIT 200"
+    )
+    rows = await conn.fetch(sql, *params)
+    scored = []
+    for r in rows:
+        hay = ((r.get("title") or "") + "\n" + (r.get("content") or "")).lower()
+        hit = sum(1 for t in toks if t in hay)
+        if hit:
+            scored.append((hit, r))
+    scored.sort(key=lambda x: -x[0])
+    out = []
+    for hit, r in scored[:k]:
+        d = _row_to_dict(r)
+        d["score"] = round(hit / max(1, len(toks)), 4)
+        out.append(d)
+    return out
+
+
 async def kb_retrieve(query: str, k: int = 5):
-    """语义召回；嵌入不可用时退化为全文 ILIKE。DB 不可达返回 []。"""
+    """跨会话召回：嵌入可用时走语义检索，不可用时退化为关键词（中文 bigram）召回。
+
+    降级链（诚实边界）：vector 检索 → 关键词召回 → 空。
+    关键词兜底保证「嵌入端点欠费 / 不可达」时记忆层仍可召回，而非直接失忆。
+    DB 不可达返回 []。
+    """
     dsn = _db_dsn()
     if not dsn or not query.strip():
         return []
@@ -107,15 +197,10 @@ async def kb_retrieve(query: str, k: int = 5):
                        LIMIT $2""",
                     str(vecs[0]), k,
                 )
-            else:
-                rows = await conn.fetch(
-                    """SELECT id, kind, title, content, source, metadata, 0.0 AS score
-                       FROM kb.entries
-                       WHERE content ILIKE $1
-                       ORDER BY created_at DESC LIMIT $2""",
-                    f"%{query}%", k,
-                )
-            return [_row_to_dict(r) for r in rows]
+                if rows:
+                    return [_row_to_dict(r) for r in rows]
+                # 向量列存在但为空（历史写入均无向量）→ 落到关键词兜底
+            return await _lexical_retrieve(conn, query, k)
         finally:
             await conn.close()
     except Exception as e:  # noqa: BLE001
