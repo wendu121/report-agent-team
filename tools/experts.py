@@ -328,6 +328,11 @@ def register_expert(eid: str, dir_rel: str, *, shape: Optional[str] = None,
     """把已落盘的专家包写入注册表（先备份后写，可回滚）。"""
     if shape and shape not in VALID_SHAPES:
         raise ExpertError(f"非法 shape：{shape!r}（可选：{list(VALID_SHAPES)}）")
+    # M12-4（REVIEW_M12.md 残留 MINOR-1）：注册表 id 也必须过 _norm_id。
+    # 本函数不以 eid 拼路径（路径取自已规范化的 dir_rel），故无越界写风险；
+    # 但 id 存原始字符串会让「注册表里出现 ../../evil 之类的脏 id」，
+    # 与 _expert_proposal_path / _write_package 的规范化不一致，属一致性缺陷。
+    eid = _norm_id(eid)
     from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
     backup = None

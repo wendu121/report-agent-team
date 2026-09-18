@@ -98,7 +98,10 @@ ALLOWED_PLACEHOLDERS = {"query", "topic", "task", "input", "term"}
 JSONPATH_RE = re.compile(r"^\$(\.[A-Za-z0-9_-]+|\[\d+\])+$")
 
 SKILL_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-VALID_ROLES = ("researcher", "analyst", "writer")
+# M12-4：新增 "chat"（对话入口）。DESIGN_M12 §7 的 V1 要求「下一个 /chat 的 system prompt
+# 实测能读到该技能」，若没有 chat 这个 role，导入的技能永远进不了对话入口 —— 该验收项
+# 在 M12-1/2 里实际是打折通过的（只验了 build_skill_context("researcher")）。
+VALID_ROLES = ("chat", "researcher", "analyst", "writer")
 VALID_TARGETS = ("skill", "tool", "datasource", "expert")
 
 UA = {"User-Agent": "report-agent-team-skill-importer/1.0"}
@@ -584,7 +587,8 @@ def build_spec(source: Dict[str, Any], level: str, reasons: List[str],
         "name": (fm.get("name") or name or _first_heading(body) or auto_id).strip(),
         "description": (fm.get("description") or _first_para(body))[:200],
         "target": "skill",
-        "target_roles": target_roles or ["researcher"],
+        # M12-4：默认含 "chat"，否则 V1（「下一个 /chat 能读到该技能」）永不达标。
+        "target_roles": target_roles or ["chat", "researcher"],
         "payload": {"markdown": source["text"].strip()},
         "provenance": {
             "source_url": source["final_url"],

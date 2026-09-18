@@ -258,6 +258,50 @@ def _build_sources(tool_entries: list) -> list:
     return sources
 
 
+def _resolve_expert_context(user_text: str) -> tuple[str, Optional[dict]]:
+    """解析本轮对话应启用的专家上下文（M12-4 · DESIGN_M12-4 §2.1）。
+
+    判定顺序（保守，宁可不注入也不误注入）：
+      1. 显式 `@<专家名>` → 命中即用（routed=False）
+      2. 否则隐式路由 `route()`（高置信且非并列第一才返回）→ routed=True
+      3. 专家包读不到/损坏/team 型 → 记录告警并**不注入**
+
+    **绝不抛异常**：专家是增强项，它的任何故障都不允许让 /chat 变 500（V8 闭环）。
+    返回 (注入片段, 专家元信息)；未启用专家时为 ("", None)。
+    """
+    try:
+        from tools import experts as ex
+    except Exception as e:  # noqa: BLE001
+        logger.debug("专家模块不可用，跳过专家接入：%s", e)
+        return "", None
+    try:
+        experts = ex.list_experts()
+        if not experts:
+            return "", None
+        eid = ex.resolve_mention(user_text, experts)
+        routed = False
+        if not eid:
+            eid = ex.route(user_text, experts)
+            routed = True
+        if not eid:
+            return "", None
+        expert = ex.get_expert(eid)
+        if not expert:
+            # 注册表有、包体读不到 —— 诚实告警，不静默当成「没有专家」
+            logger.warning("专家 %s 在注册表中命中但包体读不到，本轮不注入", eid)
+            return "", None
+        meta = {
+            "id": expert.get("id"),
+            "name": expert.get("display_name"),
+            "routed": routed,
+            "model": expert.get("model") or "",
+        }
+        return ex.build_expert_system(expert), meta
+    except Exception as e:  # noqa: BLE001
+        logger.warning("专家接入降级（本轮不注入专家，对话照常）：%s", e)
+        return "", None
+
+
 class ChatAgent:
     """对话优先 Agent；阶段 2 = function-calling + 知识层（复用引擎基础设施）。"""
 
@@ -362,7 +406,19 @@ class ChatAgent:
 
         playbook = (load_playbook() or "")[:_PLAYBOOK_BUDGET]
         tool_schemas = _build_tool_schemas(bundle, mcp, role="ChatAgent")
-        system = CHAT_SYSTEM_PROMPT + _TOOL_HINT + _tool_list_hint(tool_schemas) + playbook + kb_ctx
+        # M12-4：专家团接入（显式 @ / 隐式路由；任何故障降级为「不注入」，V8 闭环）
+        expert_ctx, expert_meta = _resolve_expert_context(user_text)
+        # M12-4：对话入口技能上下文（role=chat）。补 DESIGN_M12 §7 V1 的 /chat 侧实证 ——
+        # 此前只验了研报流水线的 build_skill_context("researcher")，/chat 根本读不到技能。
+        skill_ctx = ""
+        try:
+            from tools.skills import build_skill_context
+
+            skill_ctx = build_skill_context("chat")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("对话技能上下文注入降级（不注入，对话照常）：%s", e)
+        system = (CHAT_SYSTEM_PROMPT + expert_ctx + skill_ctx
+                  + _TOOL_HINT + _tool_list_hint(tool_schemas) + playbook + kb_ctx)
         # 注入当前日期：此前模型不知「今天」是几号（实测把 9 月答成 12 月），直接影响
         # 「今天/最新/近期」类查询的取数与作答基准。日期是实时基准，必须显式给。
         system += (
@@ -387,7 +443,9 @@ class ChatAgent:
 
         # 对话入口模型：universal alias（auto-chat）可能不支持 tools 或配额耗尽，
         # 故为工具环 fallback 到 model_mapping.yaml 的 chat.tool_model（默认 LongCat-2.0）。
-        chat_model = _resolve_chat_model(model)
+        # M12-4：专家可带模型偏好（注册表 model 字段）。用户显式指定时以用户为准，否则用
+        # 专家偏好 —— 否则注册表里的 model 就是「能填、但运行时不消费」的假配置。
+        chat_model = _resolve_chat_model(model or (expert_meta or {}).get("model") or None)
         try:
             raw, tool_entries, extra_search = _run_fc_loop(
                 self.llm,
@@ -433,6 +491,9 @@ class ChatAgent:
             "reply": reply,
             "tool_calls": tool_calls,
             "sources": sources,
+            # M12-4：本轮启用的专家（未启用为 None）。可观测：前端/日志可据此判断
+            # 到底有没有套上专家，而不是靠猜。
+            "expert": expert_meta,
         }
         if intent == "generate_report" and "report" in parsed:
             out["report"] = parsed["report"]
