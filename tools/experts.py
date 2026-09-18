@@ -25,10 +25,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # 向后兼容常量（旧代码/测试引用）：指向仓库全局。**新代码一律用下面的函数**。
 BASE = Path(__file__).resolve().parent.parent
@@ -316,6 +319,50 @@ def route(text: str, experts: Optional[List[Dict[str, Any]]] = None) -> Optional
     if best == runner:
         return None  # 并列第一 = 无法确定，回退（不猜）
     return best_id
+
+
+def resolve_expert(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """单一解析入口（DRY，闭环 DESIGN_M12 §5.1）；被 chat 侧与研报流水线共用。
+
+    判定顺序（保守，宁可不注入也不误注入）：
+      1. 显式 `@<专家名>` → 命中即用（routed=False）
+      2. 否则隐式路由 `route()`（高置信且非并列第一才返回）→ routed=True
+      3. 专家包读不到/损坏/team 型 → 记录告警并**不注入**
+
+    **绝不抛异常**：专家是增强项，它的任何故障都不允许让调用方变 500（V8 闭环）。
+    返回 (注入片段, 专家元信息)；未启用专家时为 ("", None)。
+    meta 字段：{"id","name","routed","shape","model"}；无专家为 None。
+    """
+    try:
+        experts = list_experts()
+        if not experts:
+            return "", None
+        eid = resolve_mention(text, experts)
+        routed = False
+        if not eid:
+            eid = route(text, experts)
+            routed = True
+        if not eid:
+            return "", None
+        try:
+            expert = get_expert(eid)
+        except ExpertError as e:
+            logger.warning("专家 %s 包体读取失败（team 型或已损坏），本轮不注入：%s", eid, e)
+            return "", None
+        if not expert:
+            logger.warning("专家 %s 注册表命中但包体读不到，本轮不注入", eid)
+            return "", None
+        meta: Dict[str, Any] = {
+            "id": expert.get("id"),
+            "name": expert.get("display_name"),
+            "routed": routed,
+            "shape": expert.get("shape") or "",
+            "model": expert.get("model") or "",
+        }
+        return build_expert_system(expert), meta
+    except Exception as e:  # noqa: BLE001 - 防御纵深：任何失败降级，不冒泡
+        logger.warning("专家接入降级（本轮不注入专家，主链路照常）：%s", e)
+        return "", None
 
 
 # --------------------------------------------------------------------------

@@ -261,10 +261,8 @@ def _build_sources(tool_entries: list) -> list:
 def _resolve_expert_context(user_text: str) -> tuple[str, Optional[dict]]:
     """解析本轮对话应启用的专家上下文（M12-4 · DESIGN_M12-4 §2.1）。
 
-    判定顺序（保守，宁可不注入也不误注入）：
-      1. 显式 `@<专家名>` → 命中即用（routed=False）
-      2. 否则隐式路由 `route()`（高置信且非并列第一才返回）→ routed=True
-      3. 专家包读不到/损坏/team 型 → 记录告警并**不注入**
+    自 M12-5 起委托 `tools.experts.resolve_expert`（单一解析入口，DRY，
+    闭环 DESIGN_M12 §5.1）：解析逻辑只一份，专家 = 上层封装。
 
     **绝不抛异常**：专家是增强项，它的任何故障都不允许让 /chat 变 500（V8 闭环）。
     返回 (注入片段, 专家元信息)；未启用专家时为 ("", None)。
@@ -274,32 +272,7 @@ def _resolve_expert_context(user_text: str) -> tuple[str, Optional[dict]]:
     except Exception as e:  # noqa: BLE001
         logger.debug("专家模块不可用，跳过专家接入：%s", e)
         return "", None
-    try:
-        experts = ex.list_experts()
-        if not experts:
-            return "", None
-        eid = ex.resolve_mention(user_text, experts)
-        routed = False
-        if not eid:
-            eid = ex.route(user_text, experts)
-            routed = True
-        if not eid:
-            return "", None
-        expert = ex.get_expert(eid)
-        if not expert:
-            # 注册表有、包体读不到 —— 诚实告警，不静默当成「没有专家」
-            logger.warning("专家 %s 在注册表中命中但包体读不到，本轮不注入", eid)
-            return "", None
-        meta = {
-            "id": expert.get("id"),
-            "name": expert.get("display_name"),
-            "routed": routed,
-            "model": expert.get("model") or "",
-        }
-        return ex.build_expert_system(expert), meta
-    except Exception as e:  # noqa: BLE001
-        logger.warning("专家接入降级（本轮不注入专家，对话照常）：%s", e)
-        return "", None
+    return ex.resolve_expert(user_text)
 
 
 class ChatAgent:

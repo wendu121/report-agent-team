@@ -1704,6 +1704,54 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
     return raw, tool_entries, extra_search
 
 
+def _resolve_agent_model(model_override, expert_meta, shape, models, role):
+    """任务级模型优先级（M12-5 · DESIGN_M12-5 §2.2）。
+
+    model_override（用户级显式） > 专家 model（专家包指定） > role→model 映射。
+    仅当专家 shape 与当前节点 shape 匹配时才消费其 model，避免错配节点误用。
+    """
+    expert_model = (
+        (expert_meta or {}).get("model") or ""
+        if expert_meta and (expert_meta.get("shape") == shape)
+        else ""
+    )
+    return model_override or expert_model or models["roles"][role]["model"]
+
+
+def build_pipeline_system(role: str, reg: Optional[dict] = None,
+                          user_text: Optional[str] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """组装研报流水线某节点的 system prompt（M12-5 · DESIGN_M12-5 §2.2）。
+
+    顺序（先 skill 后 expert；expert 仅 shape 匹配才注入，与 M12-4 一致）：
+      1. build_agent_system(role, reg)
+      2. + build_skill_context(role)（非空才追加）
+      3. 若 user_text 非空：tools.experts.resolve_expert → shape 匹配才追加专家片段
+
+    返回 (system, expert_meta)。expert_meta 为 None 表示本轮无专家注入；
+    无专家时 system 与「未接专家」基线逐字节一致（V3 守回归）。
+    """
+    if reg is None:
+        reg = load_agent_registry()
+    system = build_agent_system(role, reg)
+    # M9-3 研报技能库：按 enabled + target_roles 作用域拼入（热加载，零重启）。
+    skill_ctx = build_skill_context(role)
+    if skill_ctx:
+        system = system + "\n\n" + skill_ctx
+    # M12-5：专家团 persona 注入（与 skill 片段同级；shape 过滤器保证
+    # 仅对应角色节点接收该专家，绝不污染其它阶段）。
+    expert_meta: Optional[Dict[str, Any]] = None
+    if user_text:
+        try:
+            from tools import experts as ex
+            expert_ctx, expert_meta = ex.resolve_expert(user_text)
+        except Exception:  # noqa: BLE001 - 专家解析失败不阻断主链路
+            expert_ctx, expert_meta = "", None
+        if expert_meta and expert_ctx:
+            if expert_meta.get("shape") == reg["shape_of"][role]:
+                system = system + "\n\n" + expert_ctx
+    return system, expert_meta
+
+
 def make_agent(role: str, llm: LLMClient, models: dict, tools=None, reg: Optional[dict] = None,
                model_override: Optional[str] = None, on_event: Optional[Callable] = None):
     """通用 Agent 节点工厂（M9-1：按 registry 的 shape 驱动，不再按角色名硬编码）。
@@ -1727,15 +1775,17 @@ def make_agent(role: str, llm: LLMClient, models: dict, tools=None, reg: Optiona
         rs = dict(state.get("routing_state", {}))
         rs["_last_agent"] = role
         rework_reason = rs.get("rework_reason")
-        system = build_agent_system(role, reg)
-        # M9-3 研报技能库：按 enabled + target_roles 作用域将启用技能片段拼入 system prompt。
-        # 真·控制器效应：启停某技能 → 此处拼入片段增减 → 报告结构随之变化。
-        # 热加载：build_skill_context 内 load_skills() 每次 run_report 重读 skills.yaml（零重启）。
-        skill_ctx = build_skill_context(role)
-        if skill_ctx:
-            system = system + "\n\n" + skill_ctx
-        # 任务级模型接口覆盖（通用接口）；未指定则沿用 role→model 映射。
-        model = model_override or models["roles"][role]["model"]
+        # M12-5：组装 system（含 skill 片段 + shape 匹配专家 persona 注入），
+        # 并从专家元信息消费模型（优先级见 _resolve_agent_model）。
+        user_task = state.get("user_task", {}) or {}
+        try:
+            user_text = json.dumps(user_task, ensure_ascii=False)
+        except (TypeError, ValueError):
+            user_text = str(user_task)
+        system, expert_meta = build_pipeline_system(role, reg, user_text=user_text)
+        # 任务级模型接口覆盖（M12-5）：model_override > 专家 model > role→model 映射。
+        model = _resolve_agent_model(
+            model_override, expert_meta, reg["shape_of"][role], models, role)
 
         # 0) 工具前置调用（M4 关键：工具由引擎真实调用，
         #    tool_status 反映真实执行结果，不再采信 LLM 自称的 tool_status）
