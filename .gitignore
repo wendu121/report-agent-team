@@ -89,4 +89,5 @@ config/reflections.proposed.yaml
 
 # 本地 pytest 临时根（PYTEST_DEBUG_TEMPROOT 指向它，避免系统 Temp 下上万残留触发批量删除拦截）
 .pytest_tmp/
+.pytest_review/
 
