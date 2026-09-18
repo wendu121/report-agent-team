@@ -90,4 +90,9 @@ config/reflections.proposed.yaml
 # 本地 pytest 临时根（PYTEST_DEBUG_TEMPROOT 指向它，避免系统 Temp 下上万残留触发批量删除拦截）
 .pytest_tmp/
 .pytest_review/
+.pytest_*/
+
+# 提交辅助脚本的临时输出（UTF-8 提交信息 / 状态快照 / 目录列举）
+.git_*.txt
+.dir_list.txt
 

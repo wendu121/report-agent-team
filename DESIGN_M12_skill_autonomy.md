@@ -234,6 +234,8 @@ WorkBuddy 的转化策略（角色描述→Agent MD、流程→工作流程章�
 | **头像生成** | WorkBuddy 用 `ImageGen` 自动生成 | 首批：允许无头像（用文字首字占位），可选后续接 `ImageGen` |
 | **`maxTurns` / `bin/` 可执行工具** | 本引擎无对应概念 | 忽略（不报错），仅在校验时提示"该字段被忽略" |
 
+> **2026-09-18 boss 拍板（按建议）**：`expertType: team` 处置 = **维持「默认拒绝 + 清晰报错」**，不做语义有损的降级拆分。已实现于 `tools/experts.py:172-177`（`read_expert` 遇 team 且未显式 `allow_team_downgrade: true` 时抛 `ExpertError`，报错含降级指引）。理由：①真·多角色并发本引擎无等价物，降级拆分是「为尚无真实需求的功能造新语义」，违反禁过度工程铁律；②业务上暂无 team 型生态包诉求，等市场出现再按真实需求设计与验收。既有的可选逃生口 `allow_team_downgrade: true` 保留（显式声明才算接受语义有损）。
+
 ---
 
 ## 6. 安全边界（不可协商）
@@ -287,4 +289,4 @@ WorkBuddy 的转化策略（角色描述→Agent MD、流程→工作流程章�
 | LLM 产出 AssemblySpec 幻觉 | 自由生成易产生非法值 | schema 强校验 + 白名单 + dry-run 三重拦截；失败即退回人工填写 |
 | 与 M11-2 经验机制关系 | 两者都用「草稿→审批」 | 复用同一 UI/API 范式，但存储与审计分开，避免互相污染 |
 | ~~需要 boss 提供 WorkBuddy 样例~~ | **已自行解决**：本机 `expert-manager` skill 即权威规范，§5.2 已 1:1 对齐 | — |
-| **待 boss 定**：`expertType: team` 处置 | WorkBuddy 靠宿主 `TeamCreate/Agent` 做真·多角色协作，**本引擎无等价物** | 二选一：① 首批直接拒绝 team 型（保守、诚实）；② 降级为"拆成多个独立专家 + 主理人 prompt"（能覆盖更多生态包，但语义有损）。见 §5.6 |
+| **~~待 boss 定~~（2026-09-18 已拍板：维持默认拒绝）**：`expertType: team` 处置 | WorkBuddy 靠宿主 `TeamCreate/Agent` 做真·多角色协作，**本引擎无等价物** | 已选**① 首批直接拒绝 team 型（保守、诚实）**；不做②语义有损拆分（无真实需求、避免造新语义）。逃生口 `allow_team_downgrade:true` 保留，见 §5.6 |
