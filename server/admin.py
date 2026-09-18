@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import contextvars
 import threading
 import time
 import urllib.request
@@ -146,6 +147,15 @@ def _to_plain(obj: Any) -> Any:
 # 鉴权
 # ---------------------------------------------------------------------------
 
+# 当前请求上下文（由 server.main._RequestContextMiddleware 每请求注入）。
+# _require_admin 被 ~50 个端点**手动**调用（request=None），无法直接拿到 FastAPI
+# 注入的 Request，故经由本 ContextVar 回退读取 Authorization: Bearer，
+# 修复「登录态下访问 /admin/* 仍 401、进而被前端清 token 级联登出」的缺陷。
+_current_request: "contextvars.ContextVar[Optional[Request]]" = contextvars.ContextVar(
+    "rat_current_request", default=None
+)
+
+
 def _require_admin(
     x_admin_token: Optional[str] = Header(None),
     request: Optional[Request] = None,
@@ -162,7 +172,10 @@ def _require_admin(
     """
     from server import tenancy
 
-    auth_header = request.headers.get("authorization") if request is not None else None
+    # 手动调用场景下 request 为 None（~50 个端点签名未注入 Request），
+    # 回退到中间件注入的 ContextVar 读取 Bearer，杜绝登录态下 admin 端点 401。
+    req = request if request is not None else _current_request.get(None)
+    auth_header = req.headers.get("authorization") if req is not None else None
     if auth_header and auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ", 1)[1].strip()
         secret = os.getenv("AUTH_SECRET", "").strip()
@@ -1652,7 +1665,7 @@ def _models_meta() -> Dict[str, Any]:
             "cached": False,
             "disabled": True,
         }
-        _models_meta()[key] = m
+        _MODELS_META[key] = m
     return m
 
 logger = logging.getLogger(__name__)

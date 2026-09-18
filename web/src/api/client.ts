@@ -22,6 +22,7 @@ const api: AxiosInstance = axios.create({
 // 因此 token 从 localStorage 直读，401 通过 window 事件广播，由 store/路由层响应。
 const TOKEN_KEY = 'rat_token';
 export const UNAUTHORIZED_EVENT = 'rat:unauthorized';
+export const FORBIDDEN_EVENT = 'rat:forbidden';
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) || '';
@@ -47,10 +48,20 @@ api.interceptors.response.use(
   (error: AxiosError) => {
     const status = error.response?.status ?? 0;
     const data = (error.response?.data ?? {}) as Partial<ErrorResponse>;
-    // 令牌失效：清本地 token 并广播，由上层跳登录（此处不碰 store/router，守纪律）
+    // FastAPI HTTPException 实际返回 {detail: "..."}，与前端 ErrorResponse 类型不一致，
+    // 故读取原始响应体取提示文案（detail 优先，其次 message）。
+    const raw = (error.response?.data ?? {}) as Record<string, any>;
     if (status === 401) {
+      // 鉴权失败（token 失效/缺失）：清本地 token 并广播，由 main.ts 跳登录。
+      // 注意：admin 端点的 401 已由后端 _require_admin 修复（Bearer 注入 ContextVar），
+      // 此处仅在「确实未登录 / token 过期」时触发，不再误伤正常会话。
       setToken('');
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    } else if (status === 403) {
+      // 权限不足（如子账号访问仅主账号可见的【账号管理】）：保留会话，仅提示无权限。
+      const msg = typeof raw.detail === 'string' ? raw.detail
+        : typeof raw.message === 'string' ? raw.message : '';
+      window.dispatchEvent(new CustomEvent(FORBIDDEN_EVENT, { detail: msg }));
     }
     return Promise.reject(new ApiError(status, data));
   }

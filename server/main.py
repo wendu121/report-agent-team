@@ -6,8 +6,9 @@ M6-2 产出：FastAPI 应用主文件
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from .api import router as api_router
 from .websocket import router as ws_router
@@ -67,6 +68,23 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Admin-Token"],
 )
+
+
+# 请求上下文中间件：把当前 Request 注入 ContextVar，供 server.admin._require_admin
+# 在手动调用（request=None）时回退读取 Authorization: Bearer，
+# 修复「登录态下 /admin/* 仍 401 → 前端清 token 级联登出」缺陷。
+class _RequestContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        from .admin import _current_request
+
+        ctx_token = _current_request.set(request)
+        try:
+            return await call_next(request)
+        finally:
+            _current_request.reset(ctx_token)
+
+
+app.add_middleware(_RequestContextMiddleware)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/v1")
