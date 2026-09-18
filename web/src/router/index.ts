@@ -27,7 +27,8 @@ const routes = [
   // M9-5 对话式研报入口：中央输入 + 快捷模板 + 智能体组合（真调 createTask → POST /tasks → 引擎）
   { path: '/', name: 'ChatEntry', component: ChatEntry, meta: { title: '研报入口' } },
   // 聊天记录：每个会话一个窗口，URL 携带 sessionId（ChatEntry 同源组件，靠 watch 切会话）
-  { path: '/login', name: 'Login', component: Login, meta: { title: '登录' } },
+  // meta.bare：登录/注册页不套应用外壳（无侧边栏）——侧边栏是登录后才有的功能
+  { path: '/login', name: 'Login', component: Login, meta: { title: '登录', bare: true } },
   { path: '/chat/:sessionId', name: 'ChatSession', component: ChatEntry, meta: { title: '聊天' } },
   // M9-1 真·智能体市场：浏览/新增自定义 Agent（新增即真驱动流水线）
   { path: '/agents', name: 'AgentsMarket', component: AgentsMarket, meta: { title: '智能体市场' } },

@@ -113,10 +113,10 @@
       <!-- ⑤ 左下角用户区：含调试开关 + 设置入口（原配置控制台折叠至此） -->
       <div class="user-zone">
         <div class="user-row">
-          <div class="user-avatar">U</div>
+          <div class="user-avatar">{{ avatarText }}</div>
           <div class="user-meta">
-            <div class="user-name">管理员</div>
-            <div class="user-role">本地部署</div>
+            <div class="user-name">{{ displayName }}</div>
+            <div class="user-role">{{ roleLabel }}</div>
           </div>
         </div>
         <div class="user-actions">
@@ -162,6 +162,7 @@ import { storeToRefs } from 'pinia';
 import { useSettingsStore } from '@/stores/settings';
 import { useHistoryStore } from '@/stores/history';
 import { useChatSessionStore } from '@/stores/chatSessionStore';
+import { useAuthStore } from '@/stores/authStore';
 import { Plus, Delete, Search } from '@element-plus/icons-vue';
 import type { TaskStatus } from '@/types';
 
@@ -169,6 +170,17 @@ const route = useRoute();
 const router = useRouter();
 const settingsStore = useSettingsStore();
 const { debugMode } = storeToRefs(settingsStore);
+
+// 用户区：显示真实登录账号（此前硬编码「管理员」，对所有账号都错）
+const authStore = useAuthStore();
+const displayName = computed(() => authStore.me?.username || '未登录');
+const roleLabel = computed(() => {
+  const r = authStore.me?.role;
+  if (r === 'main') return '主账号';
+  if (r === 'sub') return '子账号';
+  return '本地部署';
+});
+const avatarText = computed(() => (authStore.me?.username || 'U').charAt(0).toUpperCase());
 
 // 侧边栏历史记录（共享 Pinia store：ChatEntry 提交后自动 refresh）
 const historyStore = useHistoryStore();
@@ -217,6 +229,8 @@ function toggleChat(): void {
   }
 }
 onMounted(() => {
+  // 首次进入外壳时补齐账号信息（persist 已有 me 则不重复请求）
+  if (!authStore.me) void authStore.fetchMe();
   void historyStore.refresh();
   void chatSessionStore.refresh();
 });
