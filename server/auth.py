@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from server.database import get_async_session
-from server.models import Account
+from server.models import Account, CallRecord
 from server import tenancy
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -176,6 +176,19 @@ class AccountOut(BaseModel):
 
 class ResetPasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class CallRecordOut(BaseModel):
+    """调用流水（操作记录）对外视图。不含敏感正文。"""
+    id: str
+    account_id: str
+    kind: str
+    target: Optional[str] = None
+    ok: bool
+    latency_ms: Optional[int] = None
+    cost_hint: Optional[float] = None
+    detail: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 def _out(acc: Account) -> AccountOut:
@@ -371,3 +384,50 @@ async def delete_account(child_id: str, main: Account = Depends(require_main)):
         await session.commit()
     archived = tenancy.archive_account_layout(child_id)
     return {"ok": True, "archived": str(archived) if archived else None}
+
+
+@router.get("/accounts/{child_id}/call-records", response_model=list[CallRecordOut])
+async def list_child_call_records(
+    child_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    main: Account = Depends(require_main),
+):
+    """Phase 2 · 主账号查阅子账号的调用流水（操作记录）。
+
+    越权 + 存在性：子账号必须归属本主账号，否则一律 404（避免枚举探测）。
+    返回按调用时间倒序的最近记录，支持 limit/offset 分页（limit 钳制 1~200）。
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    async with get_async_session() as session:
+        child = (
+            await session.execute(
+                select(Account).where(Account.id == child_id, Account.parent_id == main.id)
+            )
+        ).scalars().first()
+        if child is None:
+            raise HTTPException(status_code=404, detail="子账号不存在")
+        rows = (
+            await session.execute(
+                select(CallRecord)
+                .where(CallRecord.account_id == child_id)
+                .order_by(CallRecord.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars().all()
+    return [
+        CallRecordOut(
+            id=r.id,
+            account_id=r.account_id,
+            kind=r.kind,
+            target=r.target,
+            ok=r.ok,
+            latency_ms=r.latency_ms,
+            cost_hint=r.cost_hint,
+            detail=r.detail,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]

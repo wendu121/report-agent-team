@@ -54,6 +54,11 @@
             >启用</el-button>
             <el-button link @click="resetPwd(row)">重置密码</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
+            <el-button
+              v-if="row.status !== 'pending'"
+              link type="primary"
+              @click="viewRecords(row)"
+            >查阅操作记录</el-button>
           </template>
         </el-table-column>
         <template #empty>
@@ -61,6 +66,42 @@
         </template>
       </el-table>
     </el-card>
+
+    <el-dialog
+      v-model="recordsVisible"
+      :title="`操作记录 · ${recordsUser}`"
+      width="760px"
+      destroy-on-close
+    >
+      <el-table :data="records" v-loading="recordsLoading" size="small" max-height="420">
+        <el-table-column label="类型" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.kind === 'model' ? 'primary' : 'info'">
+              {{ kindLabel(row.kind) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="target" label="目标" min-width="180" show-overflow-tooltip />
+        <el-table-column label="结果" width="80">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.ok ? 'success' : 'danger'">
+              {{ row.ok ? '成功' : '失败' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="耗时" width="100">
+          <template #default="{ row }">{{ row.latency_ms != null ? row.latency_ms + ' ms' : '—' }}</template>
+        </el-table-column>
+        <el-table-column label="时间" width="170">
+          <template #default="{ row }">{{ fmt(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column prop="detail" label="说明" min-width="160" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <span class="rec-hint">最近 {{ records.length }} 条（倒序）</span>
+        <el-button @click="recordsVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -75,6 +116,12 @@ import type { AccountInfo } from '@/stores/authStore';
 
 const rows = ref<AccountInfo[]>([]);
 const loading = ref(false);
+
+// 操作记录（调用流水）对话框
+const records = ref<any[]>([]);
+const recordsLoading = ref(false);
+const recordsVisible = ref(false);
+const recordsUser = ref('');
 
 const stats = computed(() => [
   { label: '子账号总数', value: rows.value.length, tone: 'muted' as const, hint: '由本主账号管理' },
@@ -100,6 +147,9 @@ function statusType(s: string) {
 }
 function fmt(v?: string | null) {
   return v ? new Date(v).toLocaleString('zh-CN') : '—';
+}
+function kindLabel(k: string) {
+  return { model: '模型', tool: '工具', mcp: 'MCP', plugin: '插件' }[k] || k;
 }
 
 async function load() {
@@ -150,6 +200,21 @@ async function remove(row: AccountInfo) {
     await load();
   } catch (e: any) {
     ElMessage.error(e?.payload?.data?.detail || '删除失败');
+  }
+}
+
+async function viewRecords(row: AccountInfo) {
+  recordsUser.value = row.username;
+  recordsVisible.value = true;
+  recordsLoading.value = true;
+  records.value = [];
+  try {
+    const { data } = await http.get(`/auth/accounts/${row.id}/call-records?limit=50`);
+    records.value = data;
+  } catch (e: any) {
+    ElMessage.error(e?.payload?.data?.detail || '加载操作记录失败');
+  } finally {
+    recordsLoading.value = false;
   }
 }
 

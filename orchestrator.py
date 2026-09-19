@@ -1657,9 +1657,35 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
     tool_entries: list = []
     extra_search: list = []
     raw = ""
+    # 调用流水审计（老板裁定 3）：最佳努力记录「谁调了什么模型/工具」。
+    # 引擎主循环是同步函数，且引擎子进程无请求上下文，故用同步短连接写入，
+    # 失败一律吞掉，绝不阻断主链路。无账号上下文（CLI/未登录）时直接 no-op。
+    try:
+        from server import tenancy
+        _aid = tenancy.current_account_id(allow_none=True)
+    except Exception:  # noqa: BLE001
+        _aid = None
+
+    def _log(kind: str, target: str, ok: bool, latency_ms=None, detail=None):
+        if not _aid:
+            return
+        try:
+            from tools.call_log import record_call
+            record_call(_aid, kind, target=target, ok=ok, latency_ms=latency_ms, detail=detail)
+        except Exception:  # noqa: BLE001 - 审计写入失败绝不阻断主链路
+            pass
+
     for _ in range(MCP_MAX_ROUNDS):
-        resp = llm.complete_with_tools(model, system, conv_user, tools=tool_schemas,
-                                       role=role, shape=shape, kind="agent")
+        t0 = time.monotonic()
+        try:
+            resp = llm.complete_with_tools(model, system, conv_user, tools=tool_schemas,
+                                           role=role, shape=shape, kind="agent")
+        except Exception:
+            # 模型调用失败也记一笔（ok=False），再向上抛，保持原有错误语义
+            _log("model", model, ok=False,
+                 latency_ms=int((time.monotonic() - t0) * 1000), detail="LLM 调用异常")
+            raise
+        _log("model", model, ok=True, latency_ms=int((time.monotonic() - t0) * 1000))
         raw = resp.get("content") or ""
         calls = resp.get("tool_calls") or []
         if not calls:
@@ -1673,6 +1699,8 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
             except json.JSONDecodeError:
                 args = {}
             r = dispatch_tool(name, args, bundle, mcp, role)
+            _log("tool", name, ok=r.get("ok", False),
+                 detail=(r.get("error") if not r.get("ok") else None))
             tool_entries.append({
                 "agent": role, "tool": name,
                 "ok": r.get("ok", False),
