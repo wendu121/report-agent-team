@@ -179,7 +179,7 @@ class ResetPasswordIn(BaseModel):
 
 
 class CallRecordOut(BaseModel):
-    """调用流水（操作记录）对外视图。不含敏感正文。"""
+    """调用流水（操作记录）对外视图。含操作内容预览，不含密钥等敏感字段。"""
     id: str
     account_id: str
     kind: str
@@ -188,6 +188,7 @@ class CallRecordOut(BaseModel):
     latency_ms: Optional[int] = None
     cost_hint: Optional[float] = None
     detail: Optional[str] = None
+    content: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -446,6 +447,7 @@ async def list_child_call_records(
             latency_ms=r.latency_ms,
             cost_hint=r.cost_hint,
             detail=r.detail,
+            content=r.content,
             created_at=r.created_at,
         )
         for r in rows

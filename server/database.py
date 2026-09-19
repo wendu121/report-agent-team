@@ -89,6 +89,7 @@ async def get_async_session_dependency() -> AsyncGenerator[AsyncSession, None]:
 def init_database():
     """初始化数据库（创建所有表，幂等：持久卷下重复启动忽略 already exists）"""
     from sqlalchemy.exc import ProgrammingError
+    from sqlalchemy import text
     try:
         Base.metadata.create_all(bind=sync_engine, checkfirst=True)
     except ProgrammingError as e:
@@ -97,6 +98,14 @@ def init_database():
             print("⚠️ 部分表/索引已存在，幂等跳过（init_database）")
         else:
             raise
+    # 轻量迁移：为已存在的旧表补新增列（create_all 不会给已有表加列）
+    try:
+        with sync_engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS content TEXT"
+            ))
+    except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动（旧表结构可能本就不支持）
+        print(f"⚠️ call_records.content 迁移跳过：{e}")
     print("✅ 数据库表初始化完成")
 
 

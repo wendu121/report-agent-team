@@ -23,6 +23,8 @@ from server.models import CallRecord
 
 # 错误摘要截断上限，避免把长堆栈塞进调用流水表
 _DETAIL_LIMIT = 500
+# 操作内容预览截断上限：主账号查阅子账号时能看到「做了什么」，但避免整篇正文入库
+_CONTENT_LIMIT = 2000
 
 
 def record_call(
@@ -33,12 +35,14 @@ def record_call(
     latency_ms: Optional[int] = None,
     detail: Optional[str] = None,
     cost_hint: Optional[float] = None,
+    content: Optional[str] = None,
 ) -> None:
     """最佳努力写入一条调用流水。失败静默，永不抛出。"""
     if not account_id:
         return
     try:
         detail_trunc = (detail or "")[:_DETAIL_LIMIT] if detail else None
+        content_trunc = (content or "")[:_CONTENT_LIMIT] if content else None
         with get_sync_session() as session:
             session.add(
                 CallRecord(
@@ -50,6 +54,7 @@ def record_call(
                     latency_ms=latency_ms,
                     cost_hint=cost_hint,
                     detail=detail_trunc,
+                    content=content_trunc,
                     created_at=datetime.utcnow(),
                 )
             )

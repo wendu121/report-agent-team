@@ -328,6 +328,7 @@ class CallRecord(Base):
     latency_ms = Column(Integer, nullable=True, comment="耗时（毫秒）")
     cost_hint = Column(Float, nullable=True, comment="花费提示（可为 token 数等，非精确计费）")
     detail = Column(Text, nullable=True, comment="错误摘要等简短说明，不含敏感正文")
+    content = Column(Text, nullable=True, comment="操作内容预览：用户输入/模型回复/工具参数与结果（截断）")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, comment="调用时间")
 
     __table_args__ = (

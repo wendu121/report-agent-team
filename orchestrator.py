@@ -1666,12 +1666,20 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
     except Exception:  # noqa: BLE001
         _aid = None
 
-    def _log(kind: str, target: str, ok: bool, latency_ms=None, detail=None):
+    def _preview(text, limit: int = 800) -> str:
+        """操作内容预览：超长截断并标注原长，既让主账号看到「做了什么」，又不撑爆流水表。"""
+        t = ("" if text is None else str(text)).strip()
+        if not t:
+            return "（空）"
+        return t if len(t) <= limit else t[:limit] + f"…（已截断，共 {len(t)} 字）"
+
+    def _log(kind: str, target: str, ok: bool, latency_ms=None, detail=None, content=None):
         if not _aid:
             return
         try:
             from tools.call_log import record_call
-            record_call(_aid, kind, target=target, ok=ok, latency_ms=latency_ms, detail=detail)
+            record_call(_aid, kind, target=target, ok=ok, latency_ms=latency_ms,
+                        detail=detail, content=content)
         except Exception:  # noqa: BLE001 - 审计写入失败绝不阻断主链路
             pass
 
@@ -1683,9 +1691,12 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
         except Exception:
             # 模型调用失败也记一笔（ok=False），再向上抛，保持原有错误语义
             _log("model", model, ok=False,
-                 latency_ms=int((time.monotonic() - t0) * 1000), detail="LLM 调用异常")
+                 latency_ms=int((time.monotonic() - t0) * 1000), detail="LLM 调用异常",
+                 content=f"【输入】{_preview(conv_user)}")
             raise
-        _log("model", model, ok=True, latency_ms=int((time.monotonic() - t0) * 1000))
+        raw = resp.get("content") or ""
+        _log("model", model, ok=True, latency_ms=int((time.monotonic() - t0) * 1000),
+             content=f"【输入】{_preview(conv_user)}\n【回复】{_preview(raw)}")
         raw = resp.get("content") or ""
         calls = resp.get("tool_calls") or []
         if not calls:
@@ -1700,7 +1711,14 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
                 args = {}
             r = dispatch_tool(name, args, bundle, mcp, role)
             _log("tool", name, ok=r.get("ok", False),
-                 detail=(r.get("error") if not r.get("ok") else None))
+                 detail=(r.get("error") if not r.get("ok") else None),
+                 content=(
+                     f"【参数】{_preview(json.dumps(args, ensure_ascii=False), 600)}\n"
+                     f"【结果】{_preview(json.dumps(r.get('result'), ensure_ascii=False, default=str), 1200)}"
+                     if r.get("ok") else
+                     f"【参数】{_preview(json.dumps(args, ensure_ascii=False), 600)}\n"
+                     f"【错误】{_preview(r.get('error'), 800)}"
+                 ))
             tool_entries.append({
                 "agent": role, "tool": name,
                 "ok": r.get("ok", False),
