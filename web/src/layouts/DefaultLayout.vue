@@ -140,6 +140,7 @@
                 <el-dropdown-item command="mcp-servers">MCP Server</el-dropdown-item>
                 <el-dropdown-item command="experts">专家团</el-dropdown-item>
                 <el-dropdown-item command="asset-center">经验 / 反思</el-dropdown-item>
+                <el-dropdown-item v-if="authStore.me?.role === 'main'" command="accounts" divided>账号管理</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
