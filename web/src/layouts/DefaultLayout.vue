@@ -122,6 +122,10 @@
           </div>
           <template #dropdown>
             <el-dropdown-menu>
+              <el-dropdown-item command="change-password">
+                <el-icon><Key /></el-icon>
+                <span>修改密码</span>
+              </el-dropdown-item>
               <el-dropdown-item command="logout" divided>
                 <el-icon><SwitchButton /></el-icon>
                 <span>退出登录</span>
@@ -163,6 +167,35 @@
         <slot />
       </el-main>
     </el-container>
+
+    <!-- 当前账号自助改密（无需旧密码，属「重置」语义） -->
+    <el-dialog v-model="pwdVisible" title="修改密码" width="420px" destroy-on-close @closed="onPwdClosed">
+      <el-form :model="pwdForm" label-width="86px" @submit.prevent>
+        <el-form-item label="新密码" :error="pwdError">
+          <el-input
+            v-model="pwdForm.newPwd"
+            type="password"
+            show-password
+            placeholder="至少 8 位"
+            @input="pwdError = ''"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input
+            v-model="pwdForm.confirmPwd"
+            type="password"
+            show-password
+            placeholder="再次输入新密码"
+            @input="pwdError = ''"
+            @keyup.enter="submitPwd"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdVisible = false">取消</el-button>
+        <el-button type="primary" :loading="pwdLoading" @click="submitPwd">确定</el-button>
+      </template>
+    </el-dialog>
   </el-container>
 </template>
 
@@ -174,7 +207,8 @@ import { useSettingsStore } from '@/stores/settings';
 import { useHistoryStore } from '@/stores/history';
 import { useChatSessionStore } from '@/stores/chatSessionStore';
 import { useAuthStore } from '@/stores/authStore';
-import { Plus, Delete, Search } from '@element-plus/icons-vue';
+import { Plus, Delete, Search, Key } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
 import type { TaskStatus } from '@/types';
 
 const route = useRoute();
@@ -320,12 +354,59 @@ function goSettings(cmd: string): void {
   router.push(`/settings/${cmd}`);
 }
 
+// ---- 当前账号自助改密 ----
+const pwdVisible = ref(false);
+const pwdLoading = ref(false);
+const pwdForm = ref({ newPwd: '', confirmPwd: '' });
+const pwdError = ref('');
+
+function openChangePwd(): void {
+  pwdForm.value = { newPwd: '', confirmPwd: '' };
+  pwdError.value = '';
+  pwdVisible.value = true;
+}
+
+async function submitPwd(): Promise<void> {
+  const { newPwd, confirmPwd } = pwdForm.value;
+  if (newPwd.length < 8) {
+    pwdError.value = '密码至少 8 位';
+    return;
+  }
+  if (newPwd !== confirmPwd) {
+    pwdError.value = '两次输入的密码不一致';
+    return;
+  }
+  pwdError.value = '';
+  pwdLoading.value = true;
+  try {
+    await authStore.changePassword(newPwd);
+    ElMessage.success('密码已修改，请重新登录');
+    pwdVisible.value = false;
+    // 密码已变，JWT 仍有效但强制重新登录以使新密码生效
+    authStore.logout();
+    if (router.currentRoute.value.name !== 'Login') {
+      router.replace({ name: 'Login' });
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || '修改失败');
+  } finally {
+    pwdLoading.value = false;
+  }
+}
+
+function onPwdClosed(): void {
+  pwdForm.value = { newPwd: '', confirmPwd: '' };
+  pwdError.value = '';
+}
+
 function onUserCommand(cmd: string): void {
   if (cmd === 'logout') {
     authStore.logout();
     if (router.currentRoute.value.name !== 'Login') {
       router.replace({ name: 'Login' });
     }
+  } else if (cmd === 'change-password') {
+    openChangePwd();
   }
 }
 </script>

@@ -60,6 +60,10 @@ export const useAuthStore = defineStore('auth', {
       this.me = null;
       setToken('');
     },
+    // 当前登录账号自助改密（后端 /auth/change-password，无需旧密码，属「重置」语义）
+    async changePassword(newPassword: string): Promise<void> {
+      await http.post('/auth/change-password', { new_password: newPassword });
+    },
   },
   persist: true,
 });
