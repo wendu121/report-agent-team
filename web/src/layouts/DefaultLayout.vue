@@ -112,13 +112,23 @@
 
       <!-- ⑤ 左下角用户区：含调试开关 + 设置入口（原配置控制台折叠至此） -->
       <div class="user-zone">
-        <div class="user-row">
-          <div class="user-avatar">{{ avatarText }}</div>
-          <div class="user-meta">
-            <div class="user-name">{{ displayName }}</div>
-            <div class="user-role">{{ roleLabel }}</div>
+        <el-dropdown trigger="click" @command="onUserCommand" class="user-row-dropdown">
+          <div class="user-row">
+            <div class="user-avatar">{{ avatarText }}</div>
+            <div class="user-meta">
+              <div class="user-name">{{ displayName }}</div>
+              <div class="user-role">{{ roleLabel }}</div>
+            </div>
           </div>
-        </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="logout" divided>
+                <el-icon><SwitchButton /></el-icon>
+                <span>退出登录</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <div class="user-actions">
           <div class="debug-row">
             <span class="debug-label">调试模式</span>
@@ -308,6 +318,15 @@ function goSettings(cmd: string): void {
     return;
   }
   router.push(`/settings/${cmd}`);
+}
+
+function onUserCommand(cmd: string): void {
+  if (cmd === 'logout') {
+    authStore.logout();
+    if (router.currentRoute.value.name !== 'Login') {
+      router.replace({ name: 'Login' });
+    }
+  }
 }
 </script>
 
