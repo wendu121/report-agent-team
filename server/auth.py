@@ -218,12 +218,31 @@ async def register(body: RegisterIn):
         total = (await session.execute(select(func.count()).select_from(Account))).scalar() or 0
         first = total == 0
 
+        # 子账号必须归属主账号（DESIGN_account_hierarchy：开放注册→pending→主账号 approve）。
+        # 系统有且仅有唯一系统主账号（首个注册者，is_system_main）；非首个账号统一挂到它之下，
+        # 否则 parent_id 恒为 None → list_sub_accounts 用 parent_id==main.id 过滤时永远查不到，
+        # 子账号既不在审批列表、approve/reject 也会 404（被彻底孤立）。
+        parent_id: Optional[str] = None
+        if not first:
+            sys_main = (
+                await session.execute(
+                    select(Account).where(Account.is_system_main.is_(True)).limit(1)
+                )
+            ).scalars().first()
+            if sys_main is None:  # 兜底：取首个主账号
+                sys_main = (
+                    await session.execute(
+                        select(Account).where(Account.role == "main").limit(1)
+                    )
+                ).scalars().first()
+            parent_id = sys_main.id if sys_main else None
+
         acc = Account(
             id=str(uuid.uuid4()),
             username=body.username,
             password_hash=hash_password(body.password),
             role="main" if first else "sub",
-            parent_id=None,
+            parent_id=parent_id,
             status="active" if first else "pending",
             is_system_main=bool(first),
             created_at=datetime.utcnow(),
