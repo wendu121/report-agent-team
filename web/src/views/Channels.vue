@@ -134,6 +134,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { authFetch } from '@/api/client';
 import type { ChannelItem } from '@/types';
 import EntityCard from '@/components/EntityCard.vue';
 import PageHead from '@/components/PageHead.vue';
@@ -190,7 +191,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/channels`);
+    const res = await authFetch(`${API}/channels`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as ChannelItem[];
@@ -255,7 +256,7 @@ async function onSaveEndpoint(p: ChannelItem): Promise<void> {
 }
 async function putChannel(id: string, body: Record<string, unknown>): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/channels/${id}`, {
+    const res = await authFetch(`${API}/admin/channels/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -274,7 +275,7 @@ async function putChannel(id: string, body: Record<string, unknown>): Promise<vo
 
 async function onTest(p: ChannelItem): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/channels/${p.id}/test`, { method: 'POST' });
+    const res = await authFetch(`${API}/admin/channels/${p.id}/test`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const d = (data as any).detail ?? data;
@@ -290,7 +291,7 @@ async function onTest(p: ChannelItem): Promise<void> {
 
 async function onCreate(): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/channels`, {
+    const res = await authFetch(`${API}/admin/channels`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...form }),
@@ -314,7 +315,7 @@ async function onDelete(p: ChannelItem): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/admin/channels/${p.id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/admin/channels/${p.id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();

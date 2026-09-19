@@ -149,6 +149,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { authFetch } from '@/api/client';
 import type { SkillItem } from '@/types';
 import EntityCard from '@/components/EntityCard.vue';
 import PageHead from '@/components/PageHead.vue';
@@ -248,7 +249,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/skills`);
+    const res = await authFetch(`${API}/skills`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as SkillItem[];
@@ -278,7 +279,7 @@ async function onDisable(p: SkillItem): Promise<void> {
 }
 async function putSkill(id: string, body: Record<string, unknown>): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/skills/${id}`, {
+    const res = await authFetch(`${API}/admin/skills/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -297,7 +298,7 @@ async function putSkill(id: string, body: Record<string, unknown>): Promise<void
 
 async function onCreate(): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/skills`, {
+    const res = await authFetch(`${API}/admin/skills`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...form }),
@@ -321,7 +322,7 @@ async function onDelete(p: SkillItem): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/admin/skills/${p.id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/admin/skills/${p.id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();

@@ -139,6 +139,7 @@
 import { ref, reactive, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { authFetch } from '@/api/client';
 import type { AgentLibItem } from '@/types';
 import EntityCard from '@/components/EntityCard.vue';
 import PageHead from '@/components/PageHead.vue';
@@ -190,7 +191,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/agents-library`);
+    const res = await authFetch(`${API}/agents-library`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as AgentLibItem[];
@@ -233,7 +234,7 @@ function openCreate(): void {
 
 async function onCreate(): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/agents-library`, {
+    const res = await authFetch(`${API}/admin/agents-library`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -267,7 +268,7 @@ async function onDelete(a: AgentLibItem): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/admin/agents-library/${a.id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/admin/agents-library/${a.id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();

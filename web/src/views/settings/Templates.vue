@@ -46,6 +46,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { authFetch } from '@/api/client';
 import { Plus } from '@element-plus/icons-vue';
 import type { TemplateInfo } from '@/types';
 import PageHead from '@/components/PageHead.vue';
@@ -67,7 +68,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/templates`);
+    const res = await authFetch(`${API}/templates`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as TemplateInfo[];
@@ -90,7 +91,7 @@ async function onDelete(id: string): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/templates/${id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/templates/${id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();

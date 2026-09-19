@@ -32,6 +32,18 @@ export function setToken(t: string): void {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+// 原生 fetch 包装：自动注入 Bearer（与上方 axios 请求拦截器行为一致）。
+// 控制台页面用原生 fetch 调 /admin/* 时必须走它，否则请求不带 token →
+// 后端 _require_admin 判 401 → 前端响应拦截器清 token 并广播 rat:unauthorized → 级联登出。
+// 给公开端点带 Bearer 无害（后端忽略多余头），故控制台页面一律用本函数即可。
+export async function authFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const t = getToken();
+  const headers = new Headers(init.headers);
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (t) headers.set('Authorization', `Bearer ${t}`);
+  return fetch(input, { ...init, headers });
+}
+
 // 请求拦截器：注入 Bearer token
 api.interceptors.request.use((config) => {
   const t = getToken();
