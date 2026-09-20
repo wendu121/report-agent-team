@@ -6,7 +6,7 @@ M6-2 产出：FastAPI 应用主文件
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from .api import router as api_router
@@ -67,6 +67,41 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Admin-Token"],
 )
+
+
+# 请求上下文中间件：把当前 Request 注入 ContextVar，供 server.admin._require_admin
+# 在手动调用（request=None）时回退读取 Authorization: Bearer，
+# 修复「登录态下 /admin/* 仍 401 → 前端清 token 级联登出」缺陷。
+#
+# ⚠️ 必须是**纯 ASGI 中间件**，绝不能用 BaseHTTPMiddleware（2026-09-19 实测踩坑）。
+# BaseHTTPMiddleware 会在 app 外面再套一层 receive/send（内存流），`http.disconnect`
+# 被它自己消费掉，于是端点里 `await request.is_disconnected()` **永远返回 False** ——
+# 表现为「用户点停止 → 服务端完全不知道，照跑到最后并把整轮写进库」，
+# 也就是把「停止生成」做成了假按钮。
+# 对照实验见 scripts/probe_disconnect_middleware.py：同样 RST 断开，
+# 无中间件 → 立刻打出 DISCONNECT_DETECTED；套 BaseHTTPMiddleware → 永远打不出。
+class _RequestContextMiddleware:
+    """纯 ASGI：把 Request 注入 ContextVar，并把 receive 原样透传给下游。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from .admin import _current_request
+
+        # 仅用于读 header（admin.py:178），不消费 body，故 receive 透传不影响端点逻辑
+        request = Request(scope, receive)
+        ctx_token = _current_request.set(request)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _current_request.reset(ctx_token)
+
+
+app.add_middleware(_RequestContextMiddleware)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/v1")

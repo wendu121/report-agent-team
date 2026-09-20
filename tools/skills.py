@@ -67,7 +67,9 @@ MAX_CONTEXT_CHARS = int(os.getenv("SKILL_CONTEXT_MAX", "30000"))
 _logger = logging.getLogger(__name__)
 
 SKILL_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-VALID_ROLES = ["researcher", "analyst", "writer"]
+# chat 角色自 M12-4 起由 build_skill_context("chat") 在用；手动向导须与 importer 的
+# VALID_ROLES 保持一致，否则手动建 chat 技能会被 create_skill 400。
+VALID_ROLES = ["chat", "researcher", "analyst", "writer"]
 
 
 class SkillError(Exception):

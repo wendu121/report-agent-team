@@ -73,6 +73,15 @@ class JSONRepairError(Exception):
     """模型输出无法修复为合法 JSON。"""
 
 
+class LoopCancelled(Exception):
+    """用户主动中止本轮（不是错误）。
+
+    与 LLMError 语义相反：LLMError 是「没做成」，本异常是「不想做了」。
+    调用方**必须**区分处理——若被通用 `except Exception` 吞掉，用户点「停止」
+    会收到一句「抱歉，脑子打结了」，把主动取消伪装成故障。
+    设计依据：DESIGN_chat_interrupt_edit.md §3.1。"""
+
+
 # ----------------------------------------------------------------------------
 # State 定义（对齐 memory/schema.md §1-§4）
 # ----------------------------------------------------------------------------
@@ -96,6 +105,71 @@ class ReportState(TypedDict, total=False):
 # ----------------------------------------------------------------------------
 # LLM 适配器
 # ----------------------------------------------------------------------------
+def estimate_tokens(text: str) -> int:
+    """通用近似 token 计数（不绑定特定模型 tokenizer，中英文混合稳健）。
+
+    用于输入预算闸：new-api 网关背后模型上下文窗口各异，超窗即 400
+    `input length too long`。精确计数需各模型 tokenizer（本地无），故用启发式：
+      - CJK（中日韩统一表意 + 全角符号）~1.6 token/字；
+      - 拉丁词（连续 [A-Za-z0-9]）~0.25 token/词；
+      - 其余字符 ~0.3 token/字符。
+    误差对「是否超窗」判断足够，且下方 complete() 还有 input-too-long 自愈兜底。
+    """
+    if not text:
+        return 0
+    cjk = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]", text))
+    latin_words = len(re.findall(r"[A-Za-z0-9]+", text))
+    latin_chars = len(re.findall(r"[A-Za-z0-9]", text))
+    other = len(text) - cjk - latin_chars
+    return int(cjk * 1.6 + other * 0.3 + latin_words * 0.25) + 1
+
+
+def _trunc_keep_tail(text: str, max_tokens: int) -> str:
+    """按 token 近似从**头部**裁，保留尾部（最近轮对话 / 最近一次工具结果）。
+
+    对话历史/工具结果累积在 user blob 前部，最新内容在尾部——丢旧保新。
+    """
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    ratio = max(0.0, max_tokens) / max(1, estimate_tokens(text))
+    keep = max(0, int(len(text) * ratio))
+    return text[-keep:] + "\n…[已截断以适配上下文窗口]"
+
+
+def fit_input_budget(system: str, user: str, max_input_tokens: int) -> tuple:
+    """把 system+user 裁到 max_input_tokens 以内（防 400）。
+
+    顺序：① 优先裁 user（含历史/工具结果，可丢旧保新）；② 仍超限再裁 system
+    （保留头部指令）。返回 (system, user)。与具体模型/网关无关 → 通用 OpenAI 兼容。
+    """
+    sys_t = estimate_tokens(system)
+    usr_t = estimate_tokens(user)
+    if sys_t + usr_t <= max_input_tokens:
+        return system, user
+    usr_budget = max(0, max_input_tokens - sys_t)
+    # 以 user 自身是否超预算为准裁 user（不依赖 system 是否非空）。
+    # 旧实现用 `usr_budget < max_input_tokens`（等价于 sys_t>0）作门，system 为空时漏裁 → 400 无法自愈。
+    if usr_t > usr_budget:
+        user = _trunc_keep_tail(user, usr_budget)
+    if sys_t > max_input_tokens:  # system 本身超限，裁 system（保头部）
+        sys_budget = max(1, max_input_tokens)
+        system = system[: max(0, int(len(system) * (sys_budget / max(1, sys_t))))] \
+            + "\n…[system 已截断]"
+    return system, user
+
+
+# new-api 等网关对超窗的报错形态不一，统一识别「输入超上下文窗口」类错误以便自愈重试。
+_INPUT_TOO_LONG_RE = re.compile(
+    r"input length|context length|too (long|many) token|maximum context|"
+    r"exceed.*context|context.*exceed|prompt is too long|token.*exceed",
+    re.I,
+)
+
+
+def _is_input_too_long(exc: Exception) -> bool:
+    return bool(_INPUT_TOO_LONG_RE.search(str(exc)))
+
+
 class LLMClient:
     """所有 LLM 调用经此接口；具体实现可替换（new-api 网关 / 离线 stub）。"""
 
@@ -360,6 +434,88 @@ def _extract_bad_params(msg: str) -> List[str]:
     return []
 
 
+def build_bare_index(interfaces: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    """建立「裸模型名 → 接口 id 列表」倒排索引（供唯一归属消歧使用）。"""
+    idx: Dict[str, List[str]] = {}
+    for iid, iface in (interfaces or {}).items():
+        mid = (iface or {}).get("model_id")
+        if mid:
+            idx.setdefault(str(mid), []).append(iid)
+    return idx
+
+
+def resolve_model_ref(
+    model: str,
+    endpoints: Dict[str, Dict[str, Any]],
+    interfaces: Dict[str, Dict[str, Any]],
+    default_endpoint_id: Optional[str],
+    bare_index: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[str, str, Dict[str, Any], bool, bool]:
+    """解析 model → (endpoint_id, real_model_id, endpoint_cfg, matched, disambiguated)。
+
+    单一事实源：`NewApiLLMClient._resolve` 与 admin 的「解析预检」接口都调用本函数，
+    避免两侧规则漂移（DESIGN_model_mapping_uf.md 档 2）。
+
+    规则（按序）：
+      1. `endpoints` 为空 → 抛 LLMError（该账号尚未配置模型 API，给出可执行指引）。
+      2. **精确命中**某接口 id（`custom:<provider>:<model>`）→ 用该接口的 endpoint + model_id。
+      3. 未命中、但**裸名在当前账号唯一归属**某接口 → 自动采用
+         （disambiguated=True）。用于兼容「只写裸模型名」的历史写法，
+         同时避免它被静默打到不相干的默认端点。
+      4. 其余 → 回落 default endpoint + 原样模型名（matched=False），
+         **必须留 WARNING**：这是"看起来对、实际靠端点顺序"的高危路径。
+    """
+    if not endpoints:
+        raise LLMError(
+            "当前账号尚未配置模型 API：请到「设置 → 自定义 API」添加你自己的 Provider"
+            "（base_url + API Key），再选择模型。子账号不共享主账号的 new-api 网关。"
+        )
+
+    iface = interfaces.get(model)
+    if iface and iface.get("endpoint"):
+        eid = iface["endpoint"]
+        real = iface.get("model_id") or model
+        cfg = endpoints.get(eid)
+        if cfg is not None:
+            return eid, real, cfg, True, False
+        # interface 指向的 endpoint 不存在 → 诚实报错（不静默回落，避免误调错端点）
+        raise LLMError(f"模型接口 '{model}' 指向的端点 '{eid}' 未在 endpoints 中定义")
+
+    # 裸名唯一归属：消歧到唯一提供该模型的接口。
+    if bare_index is None:
+        bare_index = build_bare_index(interfaces)
+    candidates = bare_index.get(model) or []
+    if len(candidates) == 1:
+        cand = interfaces.get(candidates[0]) or {}
+        eid = cand.get("endpoint")
+        cfg = endpoints.get(eid) if eid else None
+        if cfg is not None:
+            logger.info(
+                "模型 '%s' 未命中接口 id，按当前账号唯一归属自动解析为 '%s'（端点 %s）",
+                model, candidates[0], eid,
+            )
+            return eid, cand.get("model_id") or model, cfg, True, True
+
+    eid = default_endpoint_id
+    if eid and eid in endpoints:
+        if len(candidates) > 1:
+            logger.warning(
+                "模型 '%s' 未命中任何接口 id，且在 %d 个接口上同名（%s）→ 回落默认端点 '%s'。"
+                "请改用接口 id 写法 custom:<provider>:<模型> 以明确指定厂商。",
+                model, len(candidates), "、".join(sorted(candidates)), eid,
+            )
+        else:
+            logger.warning(
+                "模型 '%s' 未命中任何接口 id → 回落默认端点 '%s'（实际模型名 %s）。"
+                "若该端点不提供此模型将报 model_not_found；建议改用接口 id 写法"
+                "custom:<provider>:<模型>。本账号可用接口：%s",
+                model, eid, model, "、".join(sorted(interfaces)) or "（无）",
+            )
+        return eid, model, endpoints[eid], False, False
+
+    raise LLMError(f"无法解析模型 '{model}'：未找到对应接口或默认端点")
+
+
 class NewApiLLMClient(LLMClient):
     """通用 OpenAI 兼容 LLM 客户端（支持多端点，DESIGN_OPENAI_ENDPOINTS.md）。
 
@@ -378,34 +534,38 @@ class NewApiLLMClient(LLMClient):
         default_endpoint_id: Optional[str] = None,
         max_retries: int = 2,
         timeout: int = 120,
+        max_input_tokens: int = 128000,
+        reserved_output_tokens: int = 4096,
     ):
         self._endpoints = {e["id"]: e for e in (endpoints or [])}
         self._interfaces = {i["id"]: i for i in (interfaces or [])}
+        # 裸模型名倒排索引（档 2 消歧用）：随 _interfaces 一次性构建，避免每次解析 O(n) 扫描。
+        self._bare_index = build_bare_index(self._interfaces)
         self._default_endpoint_id = default_endpoint_id
         self._clients: Dict[str, Any] = {}   # endpoint_id -> OpenAI client cache
         self._max_retries = max_retries
         self._timeout = timeout
+        # 输入预算闸：单次请求输入 token 上限（模型上下文窗口 - 预留输出）。
+        # 默认 128k 为通用安全值；若网关背后模型窗口更小，下方 complete() 的
+        # input-too-long 自愈会把预算逐级减半重试，无需先知窗口大小即通用可用。
+        # 可通过 models.yaml defaults.max_input_tokens 或 LLM_MAX_INPUT_TOKENS 覆盖。
+        self._max_input_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", max_input_tokens))
+        self._reserved_output_tokens = reserved_output_tokens
 
     def _resolve(self, model: str) -> Tuple[str, str, Dict[str, Any]]:
         """解析 model（interface id 或 raw model_id）→ (endpoint_id, real_model_id, endpoint_cfg)。
 
-        规则：
-          - 命中 interface 且 interface 指定 endpoint → 用该 endpoint，real_model = interface.model_id（缺省回退 model 本身）。
-          - 未命中 interface（向后兼容：旧 model_mapping.yaml 直接写模型名）→ 走 default endpoint + raw model_id。
+        实际规则收敛到模块级 `resolve_model_ref()`（单一事实源，admin「解析预检」同款），
+        本方法只做返回值形态适配（丢弃 matched / disambiguated 两个诊断标志）。
         """
-        iface = self._interfaces.get(model)
-        if iface and iface.get("endpoint"):
-            eid = iface["endpoint"]
-            real = iface.get("model_id") or model
-            cfg = self._endpoints.get(eid)
-            if cfg is not None:
-                return eid, real, cfg
-            # interface 指向的 endpoint 不存在 → 诚实报错（不静默回落，避免误调错端点）
-            raise LLMError(f"模型接口 '{model}' 指向的端点 '{eid}' 未在 endpoints 中定义")
-        eid = self._default_endpoint_id
-        if eid and eid in self._endpoints:
-            return eid, model, self._endpoints[eid]
-        raise LLMError(f"无法解析模型 '{model}'：未找到对应接口或默认端点")
+        eid, real, cfg, _matched, _disambiguated = resolve_model_ref(
+            model,
+            self._endpoints,
+            self._interfaces,
+            self._default_endpoint_id,
+            self._bare_index,
+        )
+        return eid, real, cfg
 
     def _get_client(self, endpoint_id: str):
         if endpoint_id not in self._clients:
@@ -464,7 +624,10 @@ class NewApiLLMClient(LLMClient):
     def preflight(self) -> dict:
         """连通性预检（默认端点）。失败抛 LLMError（不改写，交由调用方决定）。"""
         if not self._default_endpoint_id:
-            raise LLMError("无默认端点，无法做连通性预检")
+            raise LLMError(
+                "当前账号尚未配置模型 API（无可用端点），无法做连通性预检。"
+                "请到「设置 → 自定义 API」添加你自己的 Provider（base_url + API Key）。"
+            )
         client = self._get_client(self._default_endpoint_id)
         try:
             resp = client.models.list()
@@ -482,14 +645,25 @@ class NewApiLLMClient(LLMClient):
         last: Exception | None = None
         healed = False
         logger = logging.getLogger(__name__)
-        for attempt in range(self._max_retries + 1):
+        factor = 1.0  # 输入预算因子：遇 input-too-long 逐级减半自愈（通用，无需先知窗口）
+        halvings = 0
+        # 超窗减半走**独立且有界**的预算（最多 3 次：1.0→0.5→0.25→0.125，且 1/8 真会被发出）。
+        # 绝不放大通用重试次数——那会破坏「自愈有界、持续报错必须最终失败」的语义：
+        # 曾把总次数无脑放宽到 >=4，导致 test_heal_bounded_to_once 由绿转红（fake 第 4 次返回成功，不再抛错）。
+        _MAX_HALVINGS = 3
+        attempt = 0
+        while attempt <= self._max_retries + halvings:
+            attempt += 1
+            cur_max = max(1, int(self._max_input_tokens * factor))
+            budget = max(1, cur_max - self._reserved_output_tokens)  # 防 reserved>上限致负预算
+            sys_t, usr_t = fit_input_budget(system, user, budget)
             params = {k: v for k, v in body.items() if k.lower() not in drop}
             try:
                 resp = client.chat.completions.create(
                     model=real_model,
                     messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "system", "content": sys_t},
+                        {"role": "user", "content": usr_t},
                     ],
                     timeout=self._timeout,
                     **params,
@@ -501,6 +675,15 @@ class NewApiLLMClient(LLMClient):
             except Exception as e:  # 网络/限流/超时统一转 LLMError 并重试
                 last = e
                 msg = str(e)
+                # 输入超上下文窗口：减半预算重裁重试（factor 最低 0.125，即 1/8），
+                # 不依赖具体模型窗口大小即通用可用（new-api 背后 26+ 通道窗口各异）。
+                if _is_input_too_long(e) and halvings < _MAX_HALVINGS:
+                    factor *= 0.5
+                    halvings += 1
+                    logger.warning(
+                        "LLM 输入超上下文窗口，已减半输入预算重试（factor=%.3f，第%d次减半，模型=%s 端点=%s）：%s",
+                        factor, halvings, real_model, endpoint_id, msg[:160])
+                    continue
                 # 自愈须**先于** _is_non_retryable 判定：400 类报错若先走黑名单/穷举路径，
                 # 这段就有可能成为永远执行不到的死代码（哪怕当前 pattern 未覆盖 400 也要显式保序）。
                 if (not healed and _UNSUPPORTED_PARAM_RE.search(msg)
@@ -516,8 +699,8 @@ class NewApiLLMClient(LLMClient):
                 # 配额耗尽 / 鉴权 / 模型不存在：重试无用（且配额型会烧额度）→ 立即放弃
                 if _is_non_retryable(e):
                     raise LLMError(f"LLM 调用失败(不可重试，须换通道或修配置): {e}") from e
-                if attempt < self._max_retries:
-                    time.sleep(2 ** attempt)  # 退避 2s, 4s...
+                if attempt <= self._max_retries:  # attempt 已在循环顶部自增，等价于原 attempt < max_retries
+                    time.sleep(2 ** (attempt - 1))  # 退避
                     continue
         raise LLMError(f"LLM 调用失败(已重试 {self._max_retries} 次): {last}") from last
 
@@ -535,14 +718,23 @@ class NewApiLLMClient(LLMClient):
         last: Exception | None = None
         healed = False
         logger = logging.getLogger(__name__)
-        for attempt in range(self._max_retries + 1):
+        factor = 1.0  # 输入预算因子：遇 input-too-long 逐级减半自愈
+        halvings = 0
+        # 同 complete()：减半走独立有界预算，绝不放大通用重试次数。
+        _MAX_HALVINGS = 3
+        attempt = 0
+        while attempt <= self._max_retries + halvings:
+            attempt += 1
+            cur_max = max(1, int(self._max_input_tokens * factor))
+            budget = max(1, cur_max - self._reserved_output_tokens)  # 防 reserved>上限致负预算
+            sys_t, usr_t = fit_input_budget(system, user, budget)
             params = {k: v for k, v in body.items() if k.lower() not in drop}
             try:
                 resp = client.chat.completions.create(
                     model=real_model,
                     messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "system", "content": sys_t},
+                        {"role": "user", "content": usr_t},
                     ],
                     timeout=self._timeout,
                     **params,
@@ -552,6 +744,15 @@ class NewApiLLMClient(LLMClient):
             except Exception as e:
                 last = e
                 msg = str(e)
+                # 输入超上下文窗口：减半预算重试（tools/tool_choice 绝不裁——那是把有工具
+                # 依据的调用降成凭空作答，等同制造幻觉；只裁 system/user 文本）。
+                if _is_input_too_long(e) and halvings < _MAX_HALVINGS:
+                    factor *= 0.5
+                    halvings += 1
+                    logger.warning(
+                        "LLM 工具调用输入超上下文窗口，已减半输入预算重试（factor=%.3f，第%d次减半，模型=%s 端点=%s）：%s",
+                        factor, halvings, real_model, endpoint_id, msg[:160])
+                    continue
                 # 同 complete()：自愈先于黑名单判定；且**绝不自动剔除 tools/tool_choice**
                 # （那是把有工具依据的调用悄悄降成凭空作答，等同制造幻觉）。
                 if (not healed and _UNSUPPORTED_PARAM_RE.search(msg)
@@ -565,8 +766,8 @@ class NewApiLLMClient(LLMClient):
                     continue
                 if _is_non_retryable(e):
                     raise LLMError(f"LLM 工具调用失败(不可重试): {e}") from e
-                if attempt < self._max_retries:
-                    time.sleep(2 ** attempt)
+                if attempt <= self._max_retries:  # attempt 已在顶部自增，等价于原 attempt < max_retries
+                    time.sleep(2 ** (attempt - 1))
                     continue
         raise LLMError(f"LLM 工具调用失败(已重试 {self._max_retries} 次): {last}") from last
 
@@ -824,6 +1025,27 @@ def _expand_env_vars(value):
     return pat.sub(_repl, value)
 
 
+def _has_tenant_context() -> bool:
+    """当前是否处于「某个真实账号」的上下文里（多租户隔离的判定闸）。
+
+    DESIGN_subaccount_model_isolation.md §3-D2 的核心边界：`endpoints` 为空时，只有
+    **没有租户上下文**（CLI / legacy 全局链路 / RAT_LEGACY_GLOBAL=1）才允许用 NEWAPI_*
+    环境变量凭空造端点。只要有账号却一个端点都没有 —— 那是「该账号尚未配置自己的模型 API」的
+    配置错误，必须诚实报错，绝不能借主账号的端点顶上（借了就是假隔离）。
+
+    异常处置从严：拿不到 tenancy 模块（纯 orchestrator 独立运行/单测）→ 保持旧兜底；
+    有模块但解析异常 → 按"有账号"处理（宁可少给一个端点，也不静默借别人的）。
+    """
+    try:
+        from server import tenancy  # noqa: PLC0415 - 延迟导入避免循环依赖
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return tenancy.current_account_id(allow_none=True) is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _load_custom_providers() -> list[dict]:
     """读取用户自定义 API provider（config/custom_providers.yaml + .secrets/custom_providers.json）。
 
@@ -1033,6 +1255,19 @@ def load_model_interfaces_and_endpoints(path: Optional[str] = None) -> Tuple[
                 if e.get("id") == "new-api":
                     break
     if not endpoints:
+        # 无任何端点。两种情形必须分清（DESIGN_subaccount_model_isolation.md §3-D2）：
+        #
+        # ① 无租户上下文（CLI / legacy 全局链路）→ 保持旧行为：用 NEWAPI_* 造一个默认端点，
+        #    向后兼容历史脚本与单测。
+        # ② **有账号**但 endpoints 为空 → 该账号尚未配置自己的模型 API。此时若仍回落 env，
+        #    子账号就会静默使用主账号的网关与密钥（L2 泄漏点）。故**诚实返回空端点**，
+        #    由 NewApiLLMClient._resolve 抛出可执行的配置指引。
+        if _has_tenant_context():
+            logger.info(
+                "账号上下文内未定义任何模型端点（endpoints 为空）→ 不回落 NEWAPI_* 环境变量，"
+                "该账号需自备 Provider（设置 → 自定义 API）"
+            )
+            return endpoints, interfaces, gw, None
         gw_url = _expand_env_vars(gw.get("url", "")) or os.getenv(
             "NEWAPI_BASE_URL", "http://localhost:3000/v1")
         gw_key = _expand_env_vars(gw.get("api_key", "")) or os.getenv("NEWAPI_API_KEY", "sk-no-key")
@@ -1177,8 +1412,24 @@ def call_eval(llm: LLMClient, models: dict, state: ReportState, gate_name: str,
         f"{json.dumps(state.get(reg['agents'][role]['output_key'], []), ensure_ascii=False)}"
     )
     raw = llm.complete(eval_model, "你是评分器，只返回一个 0-1 的小数。", user, role="Eval")
-    m = re.search(r"0?\.?\d+", raw)
-    return float(m.group(0)) if m else None
+    # 可信性守卫（M13-gate-degradation）：评分器返回的是**自由文本**，原实现用
+    # `re.search(r"0?\.?\d+", raw)` 取**第一个**像数字的串、且不做任何校验：
+    #   · "85%"                     → 抠成 85.0（越界）
+    #   · "评分：1. 内容完整度 0.85"  → 抠成 1.0（**仍在 [0,1] 内，却是彻底误读**）
+    # prompt 已明确要求"只返回一个 0-1 的小数"，故改为**整条回复匹配**（只允许结尾
+    # 一个可选的"分"），而不是在散文里找数字。越界/非合规形态一律 → None（宁缺毋滥）。
+    # 理由：这些分数会被 UI 当作质量认证展示，宁可显示"未评分"，也不显示假数字。
+    # 见 DESIGN_gate_degradation_visibility.md §4.2。
+    m = re.fullmatch(r"(0?\.?\d+)\s*分?", (raw or "").strip())
+    if not m:
+        return None
+    try:
+        v = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= v <= 1.0):
+        return None
+    return v
 
 
 # ----------------------------------------------------------------------------
@@ -1536,25 +1787,78 @@ def _trim_web_results(entries: list, per_source: int = _WEB_PER_SOURCE,
 
 
 def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
-                 bundle, mcp, role: str, shape: str) -> tuple:
+                 bundle, mcp, role: str, shape: str, cancel=None) -> tuple:
     """D1-B 工具循环：调用 LLM（带 tools），解析 tool_calls，dispatch，回注，直到无 tool_calls。
 
     返回 (raw_content, tool_entries, extra_search)。LLM 异常向上抛（由调用方转 _agent_fail）。
     工具执行失败仅追加 {ok:False} 记录，不阻断。
+
+    cancel: 可选 `threading.Event`。置位时在**轮次边界**抛 `LoopCancelled` 中止本轮
+            （见 DESIGN_chat_interrupt_edit.md §3.1）。
+
+            为什么是「轮次边界」而不是立刻掐断：`llm.complete_with_tools` 是同步
+            OpenAI SDK 调用，无法从外部中断。能保证的是——**不再发起后续 LLM 调用、
+            不再执行任何工具**（原上限 MCP_MAX_ROUNDS 轮）。这是诚实的能停范围，
+            不要在文档/UI 里吹成毫秒级中断。
     """
     conv_user = user
     tool_entries: list = []
     extra_search: list = []
     raw = ""
+    # 调用流水审计（老板裁定 3）：最佳努力记录「谁调了什么模型/工具」。
+    # 引擎主循环是同步函数，且引擎子进程无请求上下文，故用同步短连接写入，
+    # 失败一律吞掉，绝不阻断主链路。无账号上下文（CLI/未登录）时直接 no-op。
+    try:
+        from server import tenancy
+        _aid = tenancy.current_account_id(allow_none=True)
+    except Exception:  # noqa: BLE001
+        _aid = None
+
+    def _preview(text, limit: int = 800) -> str:
+        """操作内容预览：超长截断并标注原长，既让主账号看到「做了什么」，又不撑爆流水表。"""
+        t = ("" if text is None else str(text)).strip()
+        if not t:
+            return "（空）"
+        return t if len(t) <= limit else t[:limit] + f"…（已截断，共 {len(t)} 字）"
+
+    def _log(kind: str, target: str, ok: bool, latency_ms=None, detail=None, content=None):
+        if not _aid:
+            return
+        try:
+            from tools.call_log import record_call
+            record_call(_aid, kind, target=target, ok=ok, latency_ms=latency_ms,
+                        detail=detail, content=content)
+        except Exception:  # noqa: BLE001 - 审计写入失败绝不阻断主链路
+            pass
+
     for _ in range(MCP_MAX_ROUNDS):
-        resp = llm.complete_with_tools(model, system, conv_user, tools=tool_schemas,
-                                       role=role, shape=shape, kind="agent")
+        # 轮次边界取消检查（用户点「停止」）：必须在调 LLM 与执行工具之前，
+        # 否则取消后仍会多花一次模型调用/一次工具执行。
+        if cancel is not None and cancel.is_set():
+            raise LoopCancelled()
+        t0 = time.monotonic()
+        try:
+            resp = llm.complete_with_tools(model, system, conv_user, tools=tool_schemas,
+                                           role=role, shape=shape, kind="agent")
+        except Exception:
+            # 模型调用失败也记一笔（ok=False），再向上抛，保持原有错误语义
+            _log("model", model, ok=False,
+                 latency_ms=int((time.monotonic() - t0) * 1000), detail="LLM 调用异常",
+                 content=f"【输入】{_preview(conv_user)}")
+            raise
+        raw = resp.get("content") or ""
+        _log("model", model, ok=True, latency_ms=int((time.monotonic() - t0) * 1000),
+             content=f"【输入】{_preview(conv_user)}\n【回复】{_preview(raw)}")
         raw = resp.get("content") or ""
         calls = resp.get("tool_calls") or []
         if not calls:
             break
         summaries = []
         for call in calls:
+            # 每个工具执行前再查一次：模型可能一次返回多个 tool_calls，
+            # 中途被取消时不该把剩下的工具全部跑完（可能是昂贵的外部检索）。
+            if cancel is not None and cancel.is_set():
+                raise LoopCancelled()
             fn = call.get("function", {})
             name = fn.get("name", "")
             try:
@@ -1562,6 +1866,15 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
             except json.JSONDecodeError:
                 args = {}
             r = dispatch_tool(name, args, bundle, mcp, role)
+            _log("tool", name, ok=r.get("ok", False),
+                 detail=(r.get("error") if not r.get("ok") else None),
+                 content=(
+                     f"【参数】{_preview(json.dumps(args, ensure_ascii=False), 600)}\n"
+                     f"【结果】{_preview(json.dumps(r.get('result'), ensure_ascii=False, default=str), 1200)}"
+                     if r.get("ok") else
+                     f"【参数】{_preview(json.dumps(args, ensure_ascii=False), 600)}\n"
+                     f"【错误】{_preview(r.get('error'), 800)}"
+                 ))
             tool_entries.append({
                 "agent": role, "tool": name,
                 "ok": r.get("ok", False),
@@ -1576,12 +1889,19 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
                     extra_search.extend(entries)
                     # 裁剪后回注：防 token 爆炸 + 防关键源被淹没（见 _trim_web_results 注释）
                     summary = {"tool": name, "results": _trim_web_results(entries)}
-                    # 诚实降级：一条都没取到时把失败明细回给模型，
-                    # 否则模型只会笼统答「返回空结果」，掩盖「境外被拦/源异常」这类真实原因。
+                    # 诚实降级（2026-09-19）：一是「一条都没取到」时把失败明细回给模型；
+                    # 二是「部分源根本没装载（缺密钥）」时必须同样告知——否则模型会以为
+                    # 自己搜遍了全部数据源，进而把「没搜到」讲成「没有这回事」。
                     if not entries:
                         fails = _fmt_failures(r.get("status"))
                         if fails:
                             summary["failed_sources"] = fails
+                    unavailable = [
+                        f"{d.get('id')}: {'未配置密钥' if d.get('reason') == 'missing_key' else d.get('reason')}，本次未参与检索"
+                        for d in (getattr(getattr(bundle, "web_search", None), "degraded", []) or [])
+                    ]
+                    if unavailable:
+                        summary["unavailable_sources"] = unavailable
                     summaries.append(summary)
                 elif name == "data_proc":
                     summaries.append({"tool": name, "calc": r.get("result", {}).get("calc")})
@@ -1591,6 +1911,54 @@ def _run_fc_loop(llm, model: str, system: str, user: str, tool_schemas: list,
                 summaries.append({"tool": name, "error": r.get("error")})
         conv_user = conv_user + "\n【工具执行结果】\n" + json.dumps(summaries, ensure_ascii=False)
     return raw, tool_entries, extra_search
+
+
+def _resolve_agent_model(model_override, expert_meta, shape, models, role):
+    """任务级模型优先级（M12-5 · DESIGN_M12-5 §2.2）。
+
+    model_override（用户级显式） > 专家 model（专家包指定） > role→model 映射。
+    仅当专家 shape 与当前节点 shape 匹配时才消费其 model，避免错配节点误用。
+    """
+    expert_model = (
+        (expert_meta or {}).get("model") or ""
+        if expert_meta and (expert_meta.get("shape") == shape)
+        else ""
+    )
+    return model_override or expert_model or models["roles"][role]["model"]
+
+
+def build_pipeline_system(role: str, reg: Optional[dict] = None,
+                          user_text: Optional[str] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """组装研报流水线某节点的 system prompt（M12-5 · DESIGN_M12-5 §2.2）。
+
+    顺序（先 skill 后 expert；expert 仅 shape 匹配才注入，与 M12-4 一致）：
+      1. build_agent_system(role, reg)
+      2. + build_skill_context(role)（非空才追加）
+      3. 若 user_text 非空：tools.experts.resolve_expert → shape 匹配才追加专家片段
+
+    返回 (system, expert_meta)。expert_meta 为 None 表示本轮无专家注入；
+    无专家时 system 与「未接专家」基线逐字节一致（V3 守回归）。
+    """
+    if reg is None:
+        reg = load_agent_registry()
+    system = build_agent_system(role, reg)
+    # M9-3 研报技能库：按 enabled + target_roles 作用域拼入（热加载，零重启）。
+    skill_ctx = build_skill_context(role)
+    if skill_ctx:
+        system = system + "\n\n" + skill_ctx
+    # M12-5：专家团 persona 注入（与 skill 片段同级；shape 过滤器保证
+    # 仅对应角色节点接收该专家，绝不污染其它阶段）。
+    expert_meta: Optional[Dict[str, Any]] = None
+    if user_text:
+        try:
+            from tools import experts as ex
+            expert_ctx, expert_meta = ex.resolve_expert(user_text)
+        except Exception:  # noqa: BLE001 - 专家解析失败不阻断主链路
+            expert_ctx, expert_meta = "", None
+        if expert_meta and expert_ctx:
+            if expert_meta.get("shape") == reg["shape_of"][role]:
+                system = system + "\n\n" + expert_ctx
+    return system, expert_meta
 
 
 def make_agent(role: str, llm: LLMClient, models: dict, tools=None, reg: Optional[dict] = None,
@@ -1616,15 +1984,17 @@ def make_agent(role: str, llm: LLMClient, models: dict, tools=None, reg: Optiona
         rs = dict(state.get("routing_state", {}))
         rs["_last_agent"] = role
         rework_reason = rs.get("rework_reason")
-        system = build_agent_system(role, reg)
-        # M9-3 研报技能库：按 enabled + target_roles 作用域将启用技能片段拼入 system prompt。
-        # 真·控制器效应：启停某技能 → 此处拼入片段增减 → 报告结构随之变化。
-        # 热加载：build_skill_context 内 load_skills() 每次 run_report 重读 skills.yaml（零重启）。
-        skill_ctx = build_skill_context(role)
-        if skill_ctx:
-            system = system + "\n\n" + skill_ctx
-        # 任务级模型接口覆盖（通用接口）；未指定则沿用 role→model 映射。
-        model = model_override or models["roles"][role]["model"]
+        # M12-5：组装 system（含 skill 片段 + shape 匹配专家 persona 注入），
+        # 并从专家元信息消费模型（优先级见 _resolve_agent_model）。
+        user_task = state.get("user_task", {}) or {}
+        try:
+            user_text = json.dumps(user_task, ensure_ascii=False)
+        except (TypeError, ValueError):
+            user_text = str(user_task)
+        system, expert_meta = build_pipeline_system(role, reg, user_text=user_text)
+        # 任务级模型接口覆盖（M12-5）：model_override > 专家 model > role→model 映射。
+        model = _resolve_agent_model(
+            model_override, expert_meta, reg["shape_of"][role], models, role)
 
         # 0) 工具前置调用（M4 关键：工具由引擎真实调用，
         #    tool_status 反映真实执行结果，不再采信 LLM 自称的 tool_status）
@@ -1931,11 +2301,17 @@ def make_gate(gate_name: str, llm: LLMClient, models: dict, is_terminal: bool = 
         #    设计上 LLM 闸是「建议性」质量判断，代码硬校验才是权威（gates/review.md §5）。
         #    故：代码校验已通过（code_dec=None）而闸 LLM 不可用 → 降级放行（可审计），
         #        不再误杀整任务；仅当代码校验本身判 rework/escalate 时才照代码结论。
+        # review_status：本条闸记录的**依据来源**，与下面 4 个分支 1:1 对应，不新增判定逻辑。
+        # 之所以要显式建模：降级放行时 reason 里虽写了"降级放行"，但 UI 只显示
+        # decision（放行/打回）+ eval_score，用户会把一个"根本没审"的闸读成质量认证。
+        # 详见 DESIGN_gate_degradation_visibility.md §3.1。
         if parsed is None:
             if code_dec == "rework":
                 decision, reason, problem_points, eval_score = "rework", code_reason, [code_reason], None
+                review_status = "code_verified"
             elif code_dec == "escalate":
                 decision, reason, problem_points, eval_score = "escalate", code_reason, [code_reason], None
+                review_status = "code_verified"
             else:
                 # 代码硬校验通过，但审核 LLM 多次无法解析 → 降级放行 + 审计事件
                 evs = list(rs.get("engine_events", []))
@@ -1947,11 +2323,15 @@ def make_gate(gate_name: str, llm: LLMClient, models: dict, is_terminal: bool = 
                 decision = "advance"
                 reason = "审核 LLM 不可用（降级放行）：代码硬校验已通过，未见业务致命问题"
                 problem_points, eval_score = ["审核 LLM 不可用，已降级放行"], None
+                review_status = "degraded_unavailable"
         else:
             llm_dec = parsed.get("decision")
             reason = parsed.get("reason", code_reason or "")
             problem_points = parsed.get("problem_points") or [reason or "无"]
             eval_score = parsed.get("eval_score")
+            # 闸 LLM 确实产出了**可解析结论**；即便最终 decision 被代码硬校验覆盖
+            # （如 code_dec == "escalate" 强制升级），来源仍是"已审核"。
+            review_status = "llm_reviewed"
             if code_dec == "escalate":
                 # 代码硬校验判定业务致命（如检索全空）→ 直接 escalate，
                 # **不允许 LLM 的 advance 覆盖**（优先级：代码 escalate > 代码 rework > 代码 advance > LLM 判定）
@@ -1967,16 +2347,24 @@ def make_gate(gate_name: str, llm: LLMClient, models: dict, is_terminal: bool = 
                 decision = llm_dec if llm_dec in ("advance", "rework", "escalate") else "rework"
 
         # 3) eval 降级（DESIGN §10 / gates/review.md §6）
+        #    同时记「分数来源」：闸 LLM 自评 vs 独立评分器。二者语义完全不同却共用
+        #    eval_score 一个字段 —— 这正是"假质量闸"的隐蔽来源（子账号里 eval 模型与闸
+        #    模型还是同一个），必须可区分。见 DESIGN_gate_degradation_visibility.md §1.2。
+        eval_score_source = "gate_llm" if eval_score is not None else None
         if eval_score is None:
             try:
                 eval_score = call_eval(llm, models, state, gate_name, reg, role=role)
             except Exception:
                 eval_score = None
+            if eval_score is not None:
+                eval_score_source = "independent_scorer"
 
         go = {
             "decision": decision,
             "reason": reason,
             "eval_score": eval_score,
+            "review_status": review_status,
+            "eval_score_source": eval_score_source,
             "problem_points": problem_points if problem_points else ["无"],
             "gate": gate_name,
             "round": rs["round"],
@@ -2006,6 +2394,10 @@ def make_gate(gate_name: str, llm: LLMClient, models: dict, is_terminal: bool = 
                     "event_type": "gate_complete", "round": rs["round"],
                     "gate": gate_name, "decision": decision, "reason": reason,
                     "eval_score": eval_score if eval_score is not None else 0.0,
+                    # M13-gate-degradation：降级标记必须随事件一路到前端时间线，
+                    # 否则"这道闸没审"只能靠用户去读 reason 小字才发现。
+                    "review_status": review_status,
+                    "eval_score_source": eval_score_source,
                     "problem_points": problem_points if problem_points else ["无"],
                 })
             except Exception as _ev:
@@ -2363,8 +2755,9 @@ def run_report(user_task: dict, llm: LLMClient, max_rounds: int = 2,
                on_event: Optional[Callable] = None) -> ReportState:
     """运行一次研报任务。
 
-    tools=None 时按 config/tools.yaml 构建（缺省 provider=tavily，
-    无 TAVILY_API_KEY 则按 fallback_to_mock 降级并告警）。
+    tools=None 时按 config/tools.yaml 构建。缺密钥的 api_key 源（如缺
+    TAVILY_API_KEY 的 tavily）**不注册**，登记进 ToolBundle.degraded 并告警，
+    不会用 mock 结果顶替真检索。
 
     plugins：本次任务使用的数据源 id 列表（None = 全部 enabled 源）。
     model：任务级模型接口覆盖（仅作用于 Agent 调用；Gate 维持异基座隔离）。
@@ -2472,10 +2865,13 @@ if __name__ == "__main__":
         "output_format_spec": "markdown",
         "constraints": ["中文输出"],
     }
-    # 真实检索需环境变量 TAVILY_API_KEY；缺失时按 config/tools.yaml 的
-    # fallback_to_mock 降级为占位数据并打印醒目告警（不静默冒充真实检索）。
+    # 真实检索需数据源密钥（DS_<ID>_API_KEY，取自 tenants/<账号>/.secrets/plugins.env）。
+    # 缺密钥的源**不再伪造占位**：它们不参与检索，并在此逐源打印（2026-09-19 修真缺陷）。
     bundle = build_tools()
-    print(f"[tools] web_search={'MOCK(占位)' if bundle.using_mock_search else 'TAVILY(真实)'}"
+    _degr = [d.get("id") for d in (getattr(bundle, "degraded", None) or [])]
+    print(f"[tools] web_search 已装载 {len(getattr(bundle.web_search, 'providers', []) or [])} 个源"
+          f"  mock={'是(显式)' if bundle.using_mock_search else '否'}"
+          f"  未参与={_degr or '无'}"
           f"  data_proc=on  doc_export=on")
     final = run_report(task, llm, max_rounds=2, tools=bundle)
     print(_summarize(final))

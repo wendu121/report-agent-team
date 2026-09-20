@@ -7,6 +7,7 @@ import type {
   EngineEvent,
   TimelineNode,
 } from '@/types';
+import { normalizeReviewStatus, isDegraded, REVIEW_STATUS_TIMELINE } from '@/utils/reviewStatus';
 
 let seq = 0;
 function nextId(prefix: string): string {
@@ -44,13 +45,16 @@ export function wsEventToNode(ev: WSEvent): TimelineNode {
         rework: 'warning',
         escalate: 'error',
       };
+      // M13-gate-degradation：闸降级时**不得**显示成"审核放行"。
+      // 后端在事件里带了 review_status；缺失（旧事件）时按 reason 文本兜底推断。
+      const degraded = normalizeReviewStatus(ev) === 'degraded_unavailable';
       return {
         id: nextId('gate'),
         type: 'gate',
         timestamp: ts,
-        title: `${label[ev.decision]} · ${ev.gate}`,
+        title: degraded ? `⚠️ 未经 AI 审核 · ${ev.gate}` : `${label[ev.decision]} · ${ev.gate}`,
         description: ev.reason || `评分 ${ev.eval_score}`,
-        status: statusMap[ev.decision],
+        status: degraded ? REVIEW_STATUS_TIMELINE.degraded_unavailable : statusMap[ev.decision],
         rawEvent: ev,
         meta: { gate: ev.gate, decision: ev.decision, eval_score: ev.eval_score, problem_points: ev.problem_points },
       };
@@ -139,9 +143,27 @@ export function wsEventToNode(ev: WSEvent): TimelineNode {
         meta: {},
       };
     }
+    case 'researcher_records_synthesized':
+    case 'writer_citation_regenerated':
+    case 'gate_llm_unavailable_degraded_advance': {
+      // 引擎层留痕事件经 WS **原样广播**：后端 `_stream_engine_events` 把 engine_events JSONL
+      // 逐条 broadcast，不区分「WS 事件」与「引擎事件」（实测：同一行同时带 event_type 与 event）。
+      // 此处复用 `ENGINE_EVENT_NODES`，与快照重建路径（engineEventToNode）保持标题/状态一致。
+      const style = ENGINE_EVENT_NODES[ev.event_type];
+      return {
+        id: nextId('engine'),
+        type: style.type,
+        timestamp: ts,
+        title: style.title,
+        description: ev.reason ?? '',
+        status: style.status,
+        rawEvent: ev,
+        meta: { event: ev.event_type, agent: ev.agent, round: ev.round, count: ev.count },
+      };
+    }
     default: {
       // 运行时兜底：若后端新增事件类型，TS 会在编译期报错（ev 被收窄为 never），
-      // 此处通过安全方式提取 event_type 字符串用于展示；主路径 8 个事件类型零断言。
+      // 此处通过安全方式提取 event_type 字符串用于展示；主路径 11 个事件类型零断言。
       const unknownType = (ev as { event_type?: unknown }).event_type ?? 'unknown';
       return {
         id: nextId('sys'),
@@ -164,31 +186,59 @@ export function gateReviewToNode(review: GateReview): TimelineNode {
     rework: '🔁 打回重做',
     escalate: '⚠️ 升级人工',
   };
+  // M13-gate-degradation：与实时路径（wsEventToNode 的 `gate_complete` 分支）**必须一致** ——
+  // 降级闸绝不可显示成「✅ 审核放行」。
+  // 实测教训（2026-09-19 夜）：初版只改了实时路径，本函数仍渲染「✅ 审核放行 · GateA」，
+  // 于是同一张追踪页上出现「✅ 审核放行」紧挨着「🔓 闸 LLM 不可用·降级放行」的自相矛盾陈述
+  // ——**比不显示更糟**，因为它把降级又包装成了审核结论。
+  const degraded = isDegraded(review);
   return {
     id: nextId('gate'),
     type: 'gate',
     timestamp: review.timestamp,
-    title: `${label[review.decision]} · ${review.gate}`,
+    title: degraded ? `⚠️ 未经 AI 审核 · ${review.gate}` : `${label[review.decision]} · ${review.gate}`,
     description: review.reason,
-    status: review.decision === 'advance' ? 'success' : review.decision === 'rework' ? 'warning' : 'error',
+    status: degraded
+      ? REVIEW_STATUS_TIMELINE.degraded_unavailable
+      : review.decision === 'advance'
+        ? 'success'
+        : review.decision === 'rework'
+          ? 'warning'
+          : 'error',
     meta: { gate: review.gate, decision: review.decision, eval_score: review.eval_score, problem_points: review.problem_points },
   };
 }
 
-// 引擎层事件（3 种）→ 节点（用于全量快照重建，调试留痕）
+// 引擎层留痕事件（4 种）→ 节点标题 / 类型 / 状态色。
+//
+// **单一事实源**：实时路径（WS 原样广播 engine_events）与快照重建路径（GET /tasks/{id}）共用。
+// M13 实现期实测教训：最初只补了快照路径的 titleMap，实时时间线仍渲染
+// 「未知事件 researcher_records_synthesized」—— 同一份映射在两条路径各写一遍，必漏其一。
+//
+// 另注（实现期对既有语义的修正，已记入 VERIFICATION）：原实现对除降级放行外的引擎事件
+// 一律给 `tool_error` + `error`（红），但 `researcher_records_synthesized` 是**纯告知性**
+// 事件（引擎把检索记录合成了，count=N），`writer_citation_regenerated` 是补救性动作，
+// 均非错误。把信息性事件渲染成红色错误同样是「挂羊头卖狗肉」，故按语义分开着色。
+const ENGINE_EVENT_NODES: Record<
+  EngineEvent['event'],
+  Pick<TimelineNode, 'title' | 'type' | 'status'>
+> = {
+  agent_output_unusable: { title: '⚠️ Agent 产出不可用', type: 'tool_error', status: 'error' },
+  writer_citation_regenerated: { title: '🔗 引用链已重建', type: 'agent', status: 'warning' },
+  gate_llm_unavailable_degraded_advance: { title: '🔓 闸 LLM 不可用·降级放行', type: 'gate', status: 'warning' },
+  researcher_records_synthesized: { title: '🧩 检索记录由引擎合成', type: 'agent', status: 'info' },
+};
+
+// 引擎层事件 → 节点（用于全量快照重建，调试留痕）
 export function engineEventToNode(ev: EngineEvent): TimelineNode {
-  const titleMap: Record<EngineEvent['event'], string> = {
-    agent_output_unusable: '⚠️ Agent 产出不可用',
-    writer_citation_regenerated: '🔗 引用链已重建',
-    gate_llm_unavailable_degraded_advance: '🔓 闸 LLM 不可用·降级放行',
-  };
+  const style = ENGINE_EVENT_NODES[ev.event];
   return {
     id: nextId('engine'),
-    type: 'tool_error',
+    type: style.type,
     timestamp: ev.timestamp,
-    title: titleMap[ev.event],
+    title: style.title,
     description: ev.reason,
-    status: ev.event === 'gate_llm_unavailable_degraded_advance' ? 'warning' : 'error',
+    status: style.status,
     meta: { event: ev.event, agent: ev.agent, gate: ev.gate, round: ev.round },
   };
 }

@@ -19,10 +19,32 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class ModelNotConfiguredError(RuntimeError):
+    """当前账号**没有任何可用的模型端点**（尚未自备 Provider）。
+
+    为什么要单独一个异常类型：`step()` 末尾的通用 `except Exception` 会把所有失败
+    吞成一句「抱歉，脑子打结了：…」并返回 HTTP 200。对"模型偶发抽风"这没问题，但对
+    "这个账号根本没配置模型 API"是**误导**——用户会以为助手答不出来，而不是"我需要先去配"。
+
+    设计依据：DESIGN_subaccount_model_isolation.md §3-D3。子账号不再继承主账号网关后，
+    新注册的子账号必然先命中这个状态，所以必须把话说清楚。
+    """
+
+
+def _llm_has_endpoints(llm: Any) -> bool:
+    """LLM 客户端是否至少有一个可路由端点（无端点 = 没配模型 API）。"""
+    eps = getattr(llm, "_endpoints", None)
+    if eps is None:
+        return True  # 非 NewApiLLMClient（如 StubLLMClient/单测替身）→ 不做该判定
+    return bool(eps)
+
+
 CHAT_SYSTEM_PROMPT = """你是「研报助手」，一个能聊天、能调工具、能生成研报、能装 skill 的 AI 助手。
 
 【你的能力】
 - 闲聊 / 自我介绍 / 能力说明
+- **跨会话长期记忆**：你拥有一层持久化知识库，跨会话保留你沉淀过的研究结论 / 事实 / 来源；回答相关问题时系统会先自动召回（以「你之前积累的相关知识」注入），供你参考。当前为关键词召回，复用关键术语召回最准。
 - 回答事实、研究、数据、最新资讯类问题：**必须先用工具联网取证，再综合回答**，**严禁凭空编造数据或来源**。
 - 实时天气 / 最新新闻：直接问「厦门天气」「今天热门新闻」即可——web_search 会自动路由到天气/新闻专用源，无需你手动选源。
 - 抓取具体链接（抓上网）：用户给出具体 URL、尤其 GitHub 仓库/文档/博客并说「分析/抓取/读一下/看看这个链接/这个仓库讲什么」时，调 fetch_url(url=链接) 抓取正文再综合回答；**不要用 web_search 去盲搜该 URL**（搜索只返回不相关结果），也不要用 run_shell 的 curl（沙箱已拦截）。fetch_url 会去抓 GitHub 仓库的 README、网页正文等真实内容。
@@ -74,6 +96,17 @@ mcp:<server>:<tool> 可调外部 MCP 工具。**严禁**对用户谎称「我无
 仅当用户明确要一份完整研报时，输出严格 JSON（不要 markdown 代码块）：
 {"intent":"generate_report","report":{"topic":"...","scope":["行业概况"],"constraints":[],"plugins":["tavily"]}}
 topic 必填且 >= 4 字。其余对话场景一律用自然语言回答，不要输出该 JSON。
+
+【你的长期记忆（跨会话知识库）】
+- 你**确实拥有**跨会话持久记忆：每轮对话前，系统会按用户问题尝试从知识库召回你此前沉淀过的相关结论、事实与来源；**召回命中时**才注入本系统提示（标题为「你之前积累的相关知识」），未命中则不注入。
+- 沉淀由系统自动完成：你对事实/研究类问题做出过工具取证的实质性回答后，系统会将其写入知识库（你无需手动存；用户说「记住：…」则是另一条经验草稿通道，需管理员采纳才生效）。
+- 召回当前为**关键词匹配**（嵌入模型暂不可用，走中文 bigram + 英文词匹配）：复用关键术语的提问召回最准；换种说法、零词面重叠的提问可能召回不到——这是真实边界，**绝不要假装「记得」实际没召回到的内容**，也别在被问「你记得吗」时否认你有记忆。
+- 当知识库命中与当前问题相关时，主动参考并在回答中体现（标注来源）；被问「你还记得 / 你之前说过」时，如实说明你确实能跨会话复用已沉淀的知识。
+
+【检索数据的诚实边界（硬规则）】
+- 工具结果里出现「unavailable_sources / failed_sources」或 UI 提示「某数据源未参与检索」时，你**必须如实说明**：明确指出哪些来源本次不可用、因此没有实时检索数据。
+- **绝不允许**在未取得真实检索数据的情况下，编造带机构署名的数据（如「XX 咨询：市场规模 XXXX 亿」「某公司年报显示…」）来填充报告或答案。
+- 若只能依靠你自身的先验知识作答，必须在答案中显著标注「以下内容来自模型自身知识，**未经本次检索验证**」，并说明建议核实的方向；宁可不给数字，也不给不可核验的数字。
 
 【输出格式】
 - 普通回答：直接自然语言（可含要点列表）。
@@ -217,6 +250,10 @@ def _build_sources(tool_entries: list) -> list:
     - web_search：result 是检索记录列表，每条带 source/url/title/snippet -> 真实引用
     - mcp:*：外部工具，result 为结构化/文本 -> 以工具全名作为来源标识
     - data_proc：派生计算，不是来源，跳过（其使用已体现在 tool_calls）
+
+    **占位数据不是来源**（2026-09-19 修真缺陷）：带 `is_mock` 的记录一律丢弃。
+    此前缺密钥的源会静默产出 `[MOCK] …` 占位，前端把它渲染成「来源（8）」——
+    用户看到 8 条「引用」，实际一条都不可核验，且真源结果被挤出展示位。
     """
     sources: list = []
     for t in tool_entries:
@@ -227,6 +264,8 @@ def _build_sources(tool_entries: list) -> list:
         if name == "web_search" and isinstance(res, list):
             for item in res:
                 if isinstance(item, dict):
+                    if item.get("is_mock"):
+                        continue  # 占位数据：不得冒充引用
                     src = item.get("source") or item.get("url") or ""
                     if src:
                         sources.append({
@@ -256,6 +295,74 @@ def _build_sources(tool_entries: list) -> list:
             })
         # data_proc 等：跳过（非来源）
     return sources
+
+
+def _source_warnings(bundle, tool_entries: list) -> tuple[list[str], bool]:
+    """诚实降级（2026-09-19 · DESIGN_source_honesty §3.3）：把「检索面不完整」讲清楚。
+
+    返回 (warnings, sources_are_real)：
+
+    - warnings：逐条人类可读告警。来源有两类：
+      ① 本次**未装载**的源（`SearchTool.degraded`，如缺密钥的 tavily）——附修复指引；
+      ② 曾收到但被丢弃的**占位记录**（`is_mock`）——明说它们不可作为事实依据。
+      **仅当本轮真的发起过 web_search** 才报 ①：闲聊不检索时不弹「某源未配置」，
+      否则每条无关对话都挂一条警告，用户会学会无视它。
+    - sources_are_real 的**精确定义**（前端据此决定是否展示「来源（N）」）：
+      本轮没发起检索 → True（无可质疑之处）；
+      发起了检索 → 仅当「无降级源 且 无占位记录被丢弃」时为 True。
+      宁可少展示，也不让用户把占位当引用。
+
+    **绝不抛异常**：告警是附加可观测性，任何异常都不允许让 /chat 变 500。
+    """
+    warnings: list[str] = []
+    try:
+        entries = [t for t in (tool_entries or []) if isinstance(t, dict)]
+        attempted_ws = any(t.get("tool") == "web_search" and t.get("ok") for t in entries)
+
+        mock_dropped = 0
+        for t in entries:
+            if t.get("tool") != "web_search":
+                continue
+            for item in (t.get("result") or []):
+                if isinstance(item, dict) and item.get("is_mock"):
+                    mock_dropped += 1
+        if mock_dropped:
+            warnings.append(
+                f"本次检索包含 {mock_dropped} 条占位数据，已从「来源」中剔除，不可作为事实依据。")
+
+        degraded = list(getattr(getattr(bundle, "web_search", None), "degraded", None) or [])
+        if attempted_ws:
+            for d in degraded:
+                if not isinstance(d, dict):
+                    continue
+                name = d.get("name") or d.get("id") or "未知数据源"
+                why = "未配置密钥" if d.get("reason") == "missing_key" else str(d.get("reason"))
+                fix = d.get("fix") or "请在「设置 → 数据源」中检查该插件配置"
+                warnings.append(
+                    f"数据源「{name}」{why}，本次未参与检索，回答未使用该来源。修复：{fix}")
+
+        sources_are_real = (not attempted_ws) or ((not degraded) and mock_dropped == 0)
+        return warnings, sources_are_real
+    except Exception as e:  # noqa: BLE001 — 可观测性不得影响主链路
+        logger.debug("source_warnings 构造降级: %s", e)
+        return warnings, True
+
+
+def _resolve_expert_context(user_text: str) -> tuple[str, Optional[dict]]:
+    """解析本轮对话应启用的专家上下文（M12-4 · DESIGN_M12-4 §2.1）。
+
+    自 M12-5 起委托 `tools.experts.resolve_expert`（单一解析入口，DRY，
+    闭环 DESIGN_M12 §5.1）：解析逻辑只一份，专家 = 上层封装。
+
+    **绝不抛异常**：专家是增强项，它的任何故障都不允许让 /chat 变 500（V8 闭环）。
+    返回 (注入片段, 专家元信息)；未启用专家时为 ("", None)。
+    """
+    try:
+        from tools import experts as ex
+    except Exception as e:  # noqa: BLE001
+        logger.debug("专家模块不可用，跳过专家接入：%s", e)
+        return "", None
+    return ex.resolve_expert(user_text)
 
 
 class ChatAgent:
@@ -312,8 +419,15 @@ class ChatAgent:
                 pass
         return m
 
-    def step(self, history: list[dict], user_msg: str, model: str | None = None) -> dict:
-        from orchestrator import _run_fc_loop, _build_tool_schemas
+    def step(self, history: list[dict], user_msg: str, model: str | None = None,
+             cancel=None) -> dict:
+        """跑一轮对话。
+
+        cancel: 可选 `threading.Event`，由 API 层在检测到浏览器断开时置位；
+                置位则本轮在工具循环的轮次边界中止，返回 `{"cancelled": True}`
+                （调用方据此**整轮不落库**，见 DESIGN_chat_interrupt_edit.md §3.1）。
+        """
+        from orchestrator import _run_fc_loop, _build_tool_schemas, LoopCancelled
         from tools._async_util import run_async
         from tools.chat_learning import (
             load_playbook,
@@ -322,6 +436,14 @@ class ChatAgent:
         )
 
         user_text = (user_msg or "").strip()
+
+        # 前置闸：本账号一个模型端点都没有 → 直接抛"未配置"，不要进入 fc-loop
+        # （进去必然失败，且会被下面的通用 except 吞成一句敷衍回复 + HTTP 200，掩盖真实原因）。
+        if not _llm_has_endpoints(self.llm):
+            raise ModelNotConfiguredError(
+                "当前账号尚未配置模型 API：请到「设置 → 自定义 API」添加你自己的 Provider"
+                "（base_url + API Key），再选择模型。子账号不共享主账号的 new-api 网关。"
+            )
 
         # 0) 「记住：…」→ 存为经验草稿（进化·写入侧，需管理员 accept 才生效）
         if user_text.startswith("记住：") or user_text.startswith("记住:"):
@@ -362,7 +484,19 @@ class ChatAgent:
 
         playbook = (load_playbook() or "")[:_PLAYBOOK_BUDGET]
         tool_schemas = _build_tool_schemas(bundle, mcp, role="ChatAgent")
-        system = CHAT_SYSTEM_PROMPT + _TOOL_HINT + _tool_list_hint(tool_schemas) + playbook + kb_ctx
+        # M12-4：专家团接入（显式 @ / 隐式路由；任何故障降级为「不注入」，V8 闭环）
+        expert_ctx, expert_meta = _resolve_expert_context(user_text)
+        # M12-4：对话入口技能上下文（role=chat）。补 DESIGN_M12 §7 V1 的 /chat 侧实证 ——
+        # 此前只验了研报流水线的 build_skill_context("researcher")，/chat 根本读不到技能。
+        skill_ctx = ""
+        try:
+            from tools.skills import build_skill_context
+
+            skill_ctx = build_skill_context("chat")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("对话技能上下文注入降级（不注入，对话照常）：%s", e)
+        system = (CHAT_SYSTEM_PROMPT + expert_ctx + skill_ctx
+                  + _TOOL_HINT + _tool_list_hint(tool_schemas) + playbook + kb_ctx)
         # 注入当前日期：此前模型不知「今天」是几号（实测把 9 月答成 12 月），直接影响
         # 「今天/最新/近期」类查询的取数与作答基准。日期是实时基准，必须显式给。
         system += (
@@ -387,7 +521,9 @@ class ChatAgent:
 
         # 对话入口模型：universal alias（auto-chat）可能不支持 tools 或配额耗尽，
         # 故为工具环 fallback 到 model_mapping.yaml 的 chat.tool_model（默认 LongCat-2.0）。
-        chat_model = _resolve_chat_model(model)
+        # M12-4：专家可带模型偏好（注册表 model 字段）。用户显式指定时以用户为准，否则用
+        # 专家偏好 —— 否则注册表里的 model 就是「能填、但运行时不消费」的假配置。
+        chat_model = _resolve_chat_model(model or (expert_meta or {}).get("model") or None)
         try:
             raw, tool_entries, extra_search = _run_fc_loop(
                 self.llm,
@@ -399,8 +535,33 @@ class ChatAgent:
                 mcp,
                 role="ChatAgent",
                 shape="researcher",
+                cancel=cancel,
             )
+        except LoopCancelled:
+            # 「用户主动停止」不是故障：必须在这里截住，绝不能落到下面的通用 except
+            # 被伪装成「抱歉，脑子打结了」——那会让用户以为系统坏了（设计 §3.1）。
+            logger.info("ChatAgent 轮次被用户中止（本轮不落库）")
+            return {"intent": "chat", "reply": "", "tool_calls": [], "cancelled": True}
         except Exception as e:  # noqa: BLE001
+            # 上游/网关故障 ≠ 内部 bug，必须分开说。
+            # 旧实现对两者一律回「抱歉，脑子打结了：…」+ HTTP 200，把
+            # 「你的 provider 返 503」「key 失效」「通道限流」这类**可执行**的真实原因
+            # 伪装成系统抽风 —— 用户既不知道发生了什么，也没法自己修。
+            # 2026-09-19 实测：子账号 provider 返 503，用户只看到一句「脑子打结」。
+            from orchestrator import LLMError
+
+            if isinstance(e, LLMError):
+                logger.warning("ChatAgent 上游模型调用失败（如实上报，不伪装成内部故障）: %s", e)
+                return {
+                    "intent": "chat",
+                    "reply": (
+                        "⚠️ 模型服务调用失败（不是你的操作问题，本轮没有产生任何结论）。\n"
+                        f"真实原因：{e}\n"
+                        "可排查：该账号的 Provider/模型配置、上游余额与限流、网关联通性。"
+                    ),
+                    "tool_calls": [],
+                    "upstream_error": str(e),
+                }
             logger.exception("chat_agent fc-loop 失败")
             return {"intent": "chat", "reply": f"抱歉，脑子打结了：{e!s}", "tool_calls": []}
 
@@ -418,9 +579,12 @@ class ChatAgent:
                 logger.debug("chat 知识沉淀降级: %s", e)
 
         tool_calls = [t.get("tool") for t in tool_entries if isinstance(t, dict)]
-        # sources 从 tool_entries 派生（web_search 真实引用 + mcp 外部工具结果），见 _build_sources
+        # sources 从 tool_entries 派生（web_search 真实引用 + mcp 外部工具结果），见 _build_sources。
+        # 占位（is_mock）记录已被 _build_sources 剔除，不会冒充「来源」。
         sources = _build_sources(tool_entries)[:8]
-        # 诊断日志：记录本轮 web_search 各真实源命中数，便于 `docker compose logs` 确认
+        # 诚实降级告警（DESIGN_source_honesty §3.3）：缺密钥/未装载的源、被剔除的占位记录。
+        source_warnings, sources_are_real = _source_warnings(self._get_bundle(), tool_entries)
+        # 诊断日志：记录本轮 web_search 各**真实**源命中数，便于 `docker compose logs` 确认
         # 「页面不通」究竟是链路未触发（open_meteo/duckduckgo 未出现）还是模型未采纳。
         _ws_src: dict[str, int] = {}
         for s in sources:
@@ -428,11 +592,23 @@ class ChatAgent:
                 _ws_src[s["source"]] = _ws_src.get(s["source"], 0) + 1
         if _ws_src:
             logger.info("[chat] web_search 各源命中=%s tool_calls=%s", _ws_src, tool_calls)
+        if source_warnings:
+            # 降级必须是**显式**的：此前缺密钥的源静默产出占位，日志反倒显示「命中 8 条」，
+            # 排查方向被日志本身带偏。这行是本次修复的核心可观测性证据。
+            logger.warning("[chat] 检索降级 degraded=%s tool_calls=%s",
+                           [d.get("id") for d in (getattr(self._get_bundle().web_search, "degraded", None) or [])],
+                           tool_calls)
         out: dict[str, Any] = {
             "intent": intent,
             "reply": reply,
             "tool_calls": tool_calls,
             "sources": sources,
+            # 诚实降级：前端据此显示醒目告警 / 决定是否展示「来源（N）」
+            "source_warnings": source_warnings,
+            "sources_are_real": sources_are_real,
+            # M12-4：本轮启用的专家（未启用为 None）。可观测：前端/日志可据此判断
+            # 到底有没有套上专家，而不是靠猜。
+            "expert": expert_meta,
         }
         if intent == "generate_report" and "report" in parsed:
             out["report"] = parsed["report"]

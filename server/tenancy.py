@@ -27,6 +27,15 @@ BASE = Path(__file__).resolve().parent.parent
 TENANTS_ROOT = Path(os.getenv("TENANTS_ROOT", str(BASE / "tenants")))
 
 # 每个租户内部的资源目录
+#
+# ⚠️ `.engine_state` 必须在这里「建」而不是「拷」：
+# 它是引擎状态目录（`{id}_input.json` / `{id}_output.json` / `{id}_events.jsonl`），
+# 在 COPY_EXCLUDE 里（运行时产物绝不继承别人的），但**必须存在**——
+# 引擎启动的第一步就是往它里面写 input.json，目录不存在会直接
+# `[Errno 2] No such file or directory` → 任务创建后 5ms 内 escalated，
+# 用户看到「任务已启动」但永远没有报告（2026-09-19 实测事故，见
+# VERIFICATION_ENGINE_STATE_DIR.md）。所以此处只建目录（mkdir，
+# parents+exist_ok 幂等），不放任何内容。
 RESOURCE_DIRS: List[str] = [
     "config",
     "agents",
@@ -36,12 +45,125 @@ RESOURCE_DIRS: List[str] = [
     "experts",
     ".secrets",
     ".audit",
+    ".engine_state",
 ]
 
 # 从模板拷贝时**必须排除**的目录/文件：
 # - .secrets：密钥不继承。子账号必须自己配自己的 key（否则就是共享凭据，等于没隔离）
 # - .audit / outputs / .engine_state：运行时产物，拷过去会串别人的日志与任务
 COPY_EXCLUDE: List[str] = [".secrets", ".audit", "outputs", ".engine_state"]
+
+# ---------------------------------------------------------------------------
+# 子账号中性模板（DESIGN_subaccount_model_isolation.md §3-D1）
+#
+# 为什么需要：`models.yaml` / `model_mapping.yaml` / `custom_providers.yaml` 三份文件承载的是
+# **主账号自己的模型归属物**——端点定义（base_url + `${NEWAPI_API_KEY}`）与模型名。密钥虽然
+# 走全局 env 展开（不落盘），但**占位符本身就等于密钥跟着来了**：子账号一旦继承，每次 LLM 调用
+# 都打在主账号的 new-api 上、烧主账号的额度。这正是"假隔离"。
+#
+# 故子账号首次激活时**不继承**这三份，改写入下述中性骨架：端点清空、映射留空、provider 清空、
+# 并关闭网关动态拉取（否则子账号的模型下拉会去拉主账号网关的真实模型列表）。
+# 骨架里刻意不填任何模型名——填了就是"能跑但跑在别人身上"的假配置（禁假配置铁律）。
+# ---------------------------------------------------------------------------
+NEUTRAL_MODELS_YAML = """# config/models.yaml · 子账号模板（注册时自动生成，不继承主账号）
+#
+# 子账号**自备模型 API**：请到「设置 → 自定义 API」添加你自己的 OpenAI 兼容
+# Provider（base_url + API Key）。添加后其模型会自动出现在 interfaces 列表中。
+# 子账号不共享主账号的 new-api 网关。
+endpoints: []
+interfaces:
+  - id: auto
+    name: 自动
+    description: 使用 model_mapping.yaml 的映射（未配置前不可用）
+    kind: auto
+    default: true
+gateway:
+  fetch_from_gateway: false
+"""
+
+NEUTRAL_MODEL_MAPPING_YAML = """# config/model_mapping.yaml · 子账号模板（注册时自动生成）
+#
+# 子账号需**自己**把角色 / 审核闸映射到你所配置的模型。
+# 最快路径：打开「设置 → 模型映射」，base / model 都是下拉框，直接选即可（无需手填）。
+#
+# 若手写本文件，务必注意（2026-09-19 实测事故：照旧指引手填裸模型名 → 请求被打到
+# 错误的厂商 → HTTP 503 model_not_found → 三道审核闸全部静默降级放行、报告仍标 done）：
+#   1) 先到「设置 → 自定义 API」添加 Provider（base_url + API Key）与模型 id；
+#   2) model 必须填**接口 id**，格式 custom:<provider id>:<模型 id>
+#      例：custom:agent:agnes-3.0-flash
+#      只写裸名（如 agnes-3.0-flash）会因命中不了接口而被**回落到默认端点**，
+#      可能把模型名发给完全不相干的厂商并报 503；
+#   3) base 填该 Provider 的 id（与 custom_providers.yaml 的 id 一致）。它是「来源标签」，
+#      **不参与路由**，仅用于硬约束校验：gates.X.base 必须 != roles[reviews].base（防自审包庇）
+#      → 至少需要两个不同来源的 Provider 才能满足硬约束；
+#   4) chat.tool_model 同样填接口 id（对话入口自主调工具用；留空会回落网关别名
+#      auto-chat，子账号没有该别名 → 必然 503）。
+roles:
+  Researcher:
+    base: ""
+    model: ""
+  Analyst:
+    base: ""
+    model: ""
+  Writer:
+    base: ""
+    model: ""
+gates:
+  GateA:
+    reviews: Researcher
+    base: ""
+    model: ""
+  GateB:
+    reviews: Analyst
+    base: ""
+    model: ""
+  GateC:
+    reviews: Writer
+    base: ""
+    model: ""
+eval:
+  base: ""
+  model: ""
+chat:
+  tool_model: ""
+"""
+
+NEUTRAL_CUSTOM_PROVIDERS_YAML = "providers: []\n"
+
+# key = 相对租户根的路径
+NEUTRAL_SEED_FILES: dict = {
+    "config/models.yaml": NEUTRAL_MODELS_YAML,
+    "config/model_mapping.yaml": NEUTRAL_MODEL_MAPPING_YAML,
+    "config/custom_providers.yaml": NEUTRAL_CUSTOM_PROVIDERS_YAML,
+}
+
+
+def _write_neutral_seed_files(root: Path, seed_root: Optional[Path] = None) -> None:
+    """给子账号写入中性模型模板（原子写）。
+
+    **覆盖判定刻意保守**：仅当目标文件「不存在」或「内容与主账号原样副本逐字节相同」时才写。
+    即——只要用户动过（自配了 provider / 填了映射），就绝不覆盖。这样重复 approve 也不会
+    把子账号已配好的模型抹掉（`POST /accounts/{id}/approve` 对已激活账号可被重复调用）。
+    """
+    for rel, text in NEUTRAL_SEED_FILES.items():
+        dst = root / rel
+        if dst.exists():
+            src = (seed_root / rel) if seed_root else None
+            if src is None or not src.exists():
+                continue  # 无法判定"是否原样继承" → 保守不动
+            try:
+                if dst.read_bytes() != src.read_bytes():
+                    continue  # 内容已不同于主账号 = 用户改过 → 保留
+            except OSError:
+                continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_suffix(dst.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, dst)
+        except OSError:
+            # 播种失败不阻断注册/审批主链路；缺文件时加载器会"诚实报错"而非借别人的端点
+            pass
 
 _current_account_id: ContextVar[Optional[str]] = ContextVar("current_account_id", default=None)
 
@@ -172,6 +294,11 @@ def ensure_account_layout(
         seed_root = account_root(seed_from)
         if seed_root.exists():
             _copy_tree_filtered(seed_root, root)
+        # 子账号：**不继承**主账号的模型/密钥归属物（models.yaml / model_mapping.yaml /
+        # custom_providers.yaml），改写入中性骨架。拷贝之后再做，用"是否仍是主账号原样副本"
+        # 判定是否覆盖（见 _write_neutral_seed_files），因此不会抹掉用户已配好的模型。
+        # 设计依据：DESIGN_subaccount_model_isolation.md §3-D1
+        _write_neutral_seed_files(root, seed_root)
     return root
 
 

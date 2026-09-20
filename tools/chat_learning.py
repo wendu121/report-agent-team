@@ -154,6 +154,10 @@ async def chat_learn_write(
     - web_search：检索记录里的 source/url
     - mcp:*：工具全名（外部知识来源）
     extra_search 仅作兼容并入。
+
+    **占位（is_mock）记录一律不作为来源**（2026-09-19）：此前缺密钥的源静默产出
+    `https://mock.local/...` 占位，会被当成来源写进知识库、且带着 `credibility: high`
+    —— 假来源被固化进长期记忆，比显示层问题更严重（后续召回会把它当事实依据）。
     """
     ok_entries = [t for t in tool_entries if isinstance(t, dict) and t.get("ok")]
     if not ok_entries:
@@ -167,15 +171,19 @@ async def chat_learn_write(
         if isinstance(res, list):
             for item in res:
                 if isinstance(item, dict):
+                    if item.get("is_mock"):
+                        continue  # 占位不是来源
                     s = item.get("source") or item.get("url") or ""
                     if s and s not in sources:
                         sources.append(s)
         elif name.startswith("mcp:") and res is not None:
             if name not in sources:
                 sources.append(name)
-    # 兼容旧调用（extra_search 仍可能带来 web_search 来源）
+    # 兼容旧调用（extra_search 仍可能带来 web_search 来源）；同样剔除占位
     for e in (extra_search or []):
         if isinstance(e, dict):
+            if e.get("is_mock"):
+                continue
             s = e.get("source") or e.get("url") or ""
             if s and s not in sources:
                 sources.append(s)

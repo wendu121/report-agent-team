@@ -22,19 +22,47 @@
         <el-table-column prop="base_url" label="Base URL" />
         <el-table-column label="密钥" width="80">
           <template #default="{ row }">
-            <el-tag :type="row.has_api_key ? 'success' : 'warning'" size="small">
-              {{ row.has_api_key ? '已配置' : '缺' }}
-            </el-tag>
+            <!-- 诚实化（DESIGN_settings_honesty.md K1）：把「缺密钥意味着什么」写在明面上，
+                 而不是只丢一个「缺」字让用户自己在调用失败里猜。 -->
+            <el-tooltip
+              :content="
+                row.has_api_key
+                  ? '已注入 .secrets/custom_providers.json'
+                  : '无密钥：引擎要求 api_key，调用必失败（本页无补密钥入口）'
+              "
+              placement="top"
+            >
+              <el-tag :type="row.has_api_key ? 'success' : 'warning'" size="small">
+                {{ row.has_api_key ? '已配置' : '缺' }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="模型数" width="70">
           <template #default="{ row }">{{ row.model_count }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="80">
+        <el-table-column label="状态" width="160">
           <template #default="{ row }">
-            <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
-              {{ row.enabled ? '启用' : '禁用' }}
-            </el-tag>
+            <!-- 三态：禁用 / 启用 / 启用·缺密钥（不可用）。
+                 过去「启用」与「有密钥」是两个独立标签，可以合法地并列成
+                 「启用 + 缺」——而这在本系统里等于「看起来可用、调用必炸」。 -->
+            <el-tooltip
+              :content="
+                row.enabled && !row.has_api_key
+                  ? '标为启用但没有密钥：调用时报「缺少 api_key」，实际不可用。请先向 .secrets/custom_providers.json 注入密钥，或把该 provider 置 enabled:false。'
+                  : row.enabled
+                    ? '下个任务可用'
+                    : '未在链路中生效'
+              "
+              placement="top"
+            >
+              <el-tag
+                :type="row.enabled && row.has_api_key ? 'success' : row.enabled ? 'danger' : 'info'"
+                size="small"
+              >
+                {{ row.enabled ? (row.has_api_key ? '启用' : '启用·缺密钥（不可用）') : '禁用' }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="140">
@@ -66,9 +94,14 @@
           <el-input v-model="dialog.form.base_url" placeholder="https://api.siliconflow.cn/v1" />
           <div class="form-hint">OpenAI 兼容根；省略 <code>/v1</code> 时系统自动补全（无需手填）</div>
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item label="API Key" required>
           <el-input v-model="dialog.form.api_key" type="password" show-password placeholder="sk-…" />
-          <div class="form-hint">可选；保存到 .secrets/custom_providers.json（600 权限）</div>
+          <!-- 原文案写「可选」＝误导：引擎要求 api_key，且后端无补密钥 / 启用开关，
+               建出来的无密钥 provider 永远没法在 UI 上救回来（仅 GET/POST/DELETE）。 -->
+          <div class="form-hint">
+            必填 · 保存到 .secrets/custom_providers.json（600 权限）。本系统要求自定义端点带密钥，
+            且当前没有补密钥入口，故不允许创建无密钥 provider。
+          </div>
         </el-form-item>
         <el-form-item label="模型 IDs">
           <el-input
@@ -112,11 +145,35 @@ const items = ref<TableItem[]>([]);
 const loading = ref(false);
 const formError = ref<string | null>(null);
 
-const stats = computed(() => [
-  { label: '自定义 Provider', value: items.value.length, tone: 'brand' as const, hint: '当前已注册' },
-  { label: '启用中', value: items.value.filter((i) => i.enabled).length, tone: 'muted' as const, hint: '下个任务可用' },
-  { label: '已配密钥', value: items.value.filter((i) => i.has_api_key).length, tone: 'muted' as const },
-]);
+// 统计口径诚实化（K1）：过去「启用中」只数 enabled，于是能出现
+// 「启用中 1 / 已配密钥 0」这种自相矛盾的看板。现改为分别给「启用·已配密钥」
+// 与「缺密钥」两项，后者在有人缺时转告警色。
+// 诚实边界（rev2 NOTE-1）：has_api_key 只证明 .secrets 里有条目，不证明密钥有效，
+// 故措辞只说「配密钥」，不得暗示「可用/可用性已验证」。
+const stats = computed(() => {
+  const missingKey = items.value.filter((i) => !i.has_api_key).length;
+  return [
+    { label: '自定义 Provider', value: items.value.length, tone: 'brand' as const, hint: '当前已注册' },
+    {
+      label: '启用·已配密钥',
+      value: items.value.filter((i) => i.enabled && i.has_api_key).length,
+      tone: 'muted' as const,
+      hint: '密钥存在≠有效，以实际调用为准',
+    },
+    {
+      label: '缺密钥',
+      value: missingKey,
+      tone: (missingKey ? 'warn' : 'muted') as 'warn' | 'muted',
+      hint: '无密钥无法调用',
+    },
+    {
+      label: '已启用',
+      value: items.value.filter((i) => i.enabled).length,
+      tone: 'muted' as const,
+      hint: '含缺密钥项',
+    },
+  ];
+});
 
 const dialog = reactive({
   show: false,
@@ -159,8 +216,14 @@ async function onSubmit(): Promise<void> {
   dialog.error = null;
   const id = dialog.form.id.trim();
   const base_url = dialog.form.base_url.trim();
+  const api_key = dialog.form.api_key.trim();
   if (!id) { dialog.error = 'ID 必填'; return; }
   if (!base_url) { dialog.error = 'Base URL 必填'; return; }
+  if (!api_key) {
+    dialog.error =
+      'API Key 必填：引擎要求自定义端点带 api_key（缺密钥调用必失败），且当前没有补密钥入口，创建之后再也无法在界面上补救。';
+    return;
+  }
   const model_ids = dialog.form.model_ids_raw
     .split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   try {
@@ -169,7 +232,7 @@ async function onSubmit(): Promise<void> {
       id,
       name: dialog.form.name.trim() || undefined,
       base_url,
-      api_key: dialog.form.api_key.trim() || undefined,
+      api_key,
       model_ids,
       enabled: dialog.form.enabled,
     });

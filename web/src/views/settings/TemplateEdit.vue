@@ -74,6 +74,7 @@
 import { ref, reactive, onMounted, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
+import { authFetch } from '@/api/client';
 import PageHead from '@/components/PageHead.vue';
 
 const API = '/api/v1/admin';
@@ -105,7 +106,7 @@ async function loadOne(): Promise<void> {
   loading.value = true;
   backendError.value = '';
   try {
-    const res = await fetch(`${API}/templates/${name.value}`);
+    const res = await authFetch(`${API}/templates/${name.value}`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const d = await res.json();
     form.name = d.name ?? '';
@@ -114,7 +115,7 @@ async function loadOne(): Promise<void> {
     form.gates = d.gates && d.gates.length ? d.gates : [...KNOWN_GATES];
     form.output_format = d.output_format && d.output_format.length ? d.output_format : ['markdown'];
     form.ui_mode = d.ui_mode ?? 'unified_shell';
-    const ar = await fetch(`${API}/templates/${name.value}/audit`);
+    const ar = await authFetch(`${API}/templates/${name.value}/audit`);
     const ad = await ar.json();
     audit.value = ad.items ?? [];
   } catch (e) {
@@ -139,7 +140,7 @@ async function onSave(): Promise<void> {
   try {
     const url = isNew.value ? `${API}/templates` : `${API}/templates/${name.value}`;
     const method = isNew.value ? 'POST' : 'PUT';
-    const res = await fetch(url, {
+    const res = await authFetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

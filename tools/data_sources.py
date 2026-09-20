@@ -3,11 +3,14 @@
 # 设计：DESIGN_M9-2.md。数据源插件 = 真·控制器（插件的 enabled/连接状态真实驱动引擎检索）。
 # - DataSourcePlugin Protocol：search(query, max_results) -> list[{title,url,content,score}]
 # - TavilyProvider（复用 web_search，真联网，需 DS_TAVILY_API_KEY）
-# - MockProvider（按源标记 [MOCK] <name>，离线/keyless 占位，保留 source）
+# - MockProvider（按源标记 [MOCK] <name>；**仅在显式 provider=mock 时装载**，
+#   结果带 is_mock=True，不得进「来源」列表冒充引用）
 # - ComingSoonProvider（raise，引擎永远跳过，绝不冒充可用）
 # - load_data_sources()：读 config/plugins.yaml（mirror load_model_mapping），重算 connected
-# - load_secrets()：读 .secrets/plugins.env + env，映射 DS_<ID大写>_API_KEY
-# - build_search_tool()：聚合 enabled 且非 coming_soon 的源，结果带 source 字段
+# - load_secrets()：读 tenants/<account_id>/.secrets/plugins.env + env，映射 DS_<ID大写>_API_KEY
+# - build_search_tool()：聚合 enabled 且非 coming_soon 的源，结果带 source 字段；
+#   **缺密钥的 api_key 源不注册**，登记到 SearchTool.degraded（reason/fix）——
+#   「不可用就明说不可用」，绝不静默伪造检索结果（2026-09-19 修真缺陷）。
 #
 # 真源扩展（auth=none，零密钥，stdlib urllib）：
 # - M10-P1：arxiv / semantic_scholar / crossref / wikipedia
@@ -1457,7 +1460,11 @@ def load_data_sources() -> list[dict]:
         cfg = yaml.safe_load(t.read_text(encoding="utf-8")) or {}
         ws = cfg.get("web_search") or {}
         prov = (ws.get("provider") or "tavily").lower()
-        status = "connected" if (prov != "mock" and secrets.get("DS_TAVILY_API_KEY")) else "disconnected"
+        # 通用化（2026-09-19）：不再硬编码 DS_TAVILY_API_KEY，与 _recompute_connected() 一致，
+        # 否则换个 provider 这条回退分支会永远报 disconnected。
+        status = ("connected" if (prov != "mock"
+                                 and secrets.get(f"DS_{prov.upper()}_API_KEY"))
+                  else "disconnected")
         return [{
             "id": "tavily", "name": "Tavily 搜索", "category": "数据源",
             "description": "（legacy）由 config/tools.yaml 驱动", "auth_type": "api_key",
@@ -1494,12 +1501,22 @@ class SearchTool:
     """
 
     def __init__(self, providers: list, max_results: int = 5, timeout: int = 20,
-                 using_mock_search: bool = True):
+                 using_mock_search: bool = False, degraded: list | None = None):
         # providers: list of (spec, provider_instance)
         self._providers = providers
         self.max_results = max_results
         self.timeout = timeout
+        # True 仅当本次**显式**装载了 provider=mock 的源（离线/链路验证）。
+        # 不再用 `not has_real` 推导——那会被「别的源是真的」中和，使降级警告永不触发。
         self.using_mock_search = using_mock_search
+        # 本次未能装载的源：[{id, name, reason, fix}]。调用方（/chat、引擎摘要、控制台）
+        # 必须据此对用户/模型如实说明「哪些源没参与」，而不是假装检索面完整。
+        self.degraded: list[dict] = list(degraded or [])
+
+    @property
+    def providers(self):
+        """本次已装载的 (spec, provider) 列表（只读）。供可观测性/验收脚本使用。"""
+        return self._providers
 
     def search_many(self, queries: list[str], agent: str = "Researcher",
                     route_by_intent: bool = False):
@@ -1533,6 +1550,16 @@ class SearchTool:
         status: list[dict] = []
         seen: set[str] = set()
         n = 0
+        # 本次装载的占位源 id 集合（结果需带 is_mock 标记，见下方收集循环）
+        mock_ids = {spec.get("id") for spec, p in self._providers
+                    if isinstance(p, MockProvider)}
+        # 降级源先登记：调用方据此知道「本次检索面不完整」，而不是把缺失源当成「没有相关内容」。
+        for d in self.degraded:
+            status.append({"agent": agent, "tool": "web_search", "source": d.get("id"),
+                           "ok": False,
+                           "error": "missing_key: 未配置密钥，本次未参与检索"
+                           if d.get("reason") == "missing_key"
+                           else f"{d.get('reason')}: 未能装载，本次未参与检索"})
         for sid, q, fut in jobs:
             try:
                 raw = fut.result()
@@ -1564,7 +1591,7 @@ class SearchTool:
                     continue
                 seen.add(url)
                 n += 1
-                results.append({
+                rec = {
                     "id": f"rec-{n}",
                     "url": url,
                     "title": (r.get("title") or url).strip(),
@@ -1572,7 +1599,12 @@ class SearchTool:
                     "credibility": score_to_credibility(r.get("score")),
                     "source": sid,
                     "_query": q,
-                })
+                }
+                # 占位数据必须自带标记：下游（sources 列表、日志「命中」计数、学习沉淀）
+                # 一律不得把占位当证据。真源记录不带此键。
+                if sid in mock_ids:
+                    rec["is_mock"] = True
+                results.append(rec)
         return results, status
 
 
@@ -1581,14 +1613,22 @@ def build_search_tool(specs: list[dict], secrets: dict, max_results: int = 5,
     """按 DESIGN §3.2 规则聚合 enabled 且非 coming_soon 的源：
     - coming_soon → 跳过（守卫，绝不冒充）
     - enabled=False → 跳过（控制器开关）
-    - api_key 且 key 缺失 → MockProvider(spec.id, spec.name) 保留 source（不崩）
     - api_key 且 key 存在 → 真 Provider（TavilyProvider）
+    - api_key 但 key 缺失 → **不注册**，登记进 degraded（reason=missing_key）
+      —— 2026-09-19 修真缺陷：此前这里静默塞 MockProvider，于是「缺密钥」被伪装成
+      「检索成功」，前端显示出 8 条假「来源」、日志把占位记成「命中 N 条」，
+      而同时取回的真源结果被挤到展示位之外。立约「禁假配置」要求：不可用就明说不可用。
+    - provider == mock → MockProvider（**仅显式声明时**；离线/链路验证用）
     - none + provider 在 KEYLESS_PROVIDERS → 真 Provider（M10-P1 公开 API 源，无需密钥）
-    - none + 其余 → MockProvider（占位，标记来源）
     - 未知 provider → 跳过（当 coming_soon 处理）
+
+    返回的 SearchTool 上 `.degraded` 列出本次**未能装载**的源及其原因与修复指引；
+    `.using_mock_search` 仅在「显式 mock 源」时才为 True（不再由「有没有真源」推导，
+    否则只要有一个 keyless 真源，全局降级警告就永远不触发）。
     """
     providers = []
-    has_real = False
+    degraded: list[dict] = []
+    has_explicit_mock = False
     for s in specs:
         if not s.get("enabled"):
             continue
@@ -1596,24 +1636,34 @@ def build_search_tool(specs: list[dict], secrets: dict, max_results: int = 5,
         if prov == "coming_soon":
             continue
         sid = s["id"]
+        name = s.get("name", sid)
         if prov == "tavily":
-            key = secrets.get(f"DS_{sid.upper()}_API_KEY")
+            env_key = f"DS_{sid.upper()}_API_KEY"
+            key = secrets.get(env_key)
             if key:
                 try:
                     providers.append((s, TavilyProvider(api_key=key, timeout=timeout)))
-                    has_real = True
                     continue
-                except ToolError:
-                    pass
-            providers.append((s, MockProvider(sid, s.get("name", sid))))
+                except ToolError as e:
+                    degraded.append({
+                        "id": sid, "name": name, "reason": "provider_init_failed",
+                        "fix": f"检查「{name}」的接口地址/密钥格式后重试（{e}）",
+                    })
+                    continue
+            degraded.append({
+                "id": sid, "name": name, "reason": "missing_key",
+                "fix": f"在「设置 → 数据源」中为「{name}」填写 API Key（环境变量名 {env_key}）",
+            })
         elif prov == "mock":
-            providers.append((s, MockProvider(sid, s.get("name", sid))))
+            # 显式 mock：合法用途（离线开发 / 链路验证），但结果带 is_mock 标记，
+            # 不得进「来源」列表冒充引用。
+            providers.append((s, MockProvider(sid, name)))
+            has_explicit_mock = True
         elif prov in KEYLESS_PROVIDERS:
             # M10-P1：keyless 真·公开 API 源（arxiv/semantic_scholar/crossref/wikipedia）
             providers.append((s, KEYLESS_PROVIDERS[prov](timeout=timeout)))
-            has_real = True
         else:
             # 未知 provider：当 coming_soon，跳过
             continue
     return SearchTool(providers, max_results=max_results, timeout=timeout,
-                      using_mock_search=not has_real)
+                      using_mock_search=has_explicit_mock, degraded=degraded)

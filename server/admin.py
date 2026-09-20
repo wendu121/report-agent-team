@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import contextvars
 import threading
 import time
 import urllib.request
@@ -36,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,15 @@ def _to_plain(obj: Any) -> Any:
 # 鉴权
 # ---------------------------------------------------------------------------
 
+# 当前请求上下文（由 server.main._RequestContextMiddleware 每请求注入）。
+# _require_admin 被 ~50 个端点**手动**调用（request=None），无法直接拿到 FastAPI
+# 注入的 Request，故经由本 ContextVar 回退读取 Authorization: Bearer，
+# 修复「登录态下访问 /admin/* 仍 401、进而被前端清 token 级联登出」的缺陷。
+_current_request: "contextvars.ContextVar[Optional[Request]]" = contextvars.ContextVar(
+    "rat_current_request", default=None
+)
+
+
 def _require_admin(
     x_admin_token: Optional[str] = Header(None),
     request: Optional[Request] = None,
@@ -162,7 +172,10 @@ def _require_admin(
     """
     from server import tenancy
 
-    auth_header = request.headers.get("authorization") if request is not None else None
+    # 手动调用场景下 request 为 None（~50 个端点签名未注入 Request），
+    # 回退到中间件注入的 ContextVar 读取 Bearer，杜绝登录态下 admin 端点 401。
+    req = request if request is not None else _current_request.get(None)
+    auth_header = req.headers.get("authorization") if req is not None else None
     if auth_header and auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ", 1)[1].strip()
         secret = os.getenv("AUTH_SECRET", "").strip()
@@ -412,6 +425,85 @@ async def put_models(
         "mapping": after,
         "validation": {"ok": True, "errors": []},
         "note": "已落盘；orchestrator.run_report 每次重新加载，下一个任务即生效（无需重启）",
+    }
+
+
+@router.post("/admin/models/preview")
+async def preview_models(
+    payload: MappingPut,
+    x_admin_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """解析预检：把提交的映射逐条解析成「实际会打到哪个端点 / 真实模型名」。
+
+    为什么需要（DESIGN_model_mapping_uf.md 档 1）：
+    `base` 只是「来源标签」，**完全不参与路由**；真正决定请求发往哪家的是 `model`
+    能否命中一个「接口 id」（`custom:<provider>:<模型>`）。用户手填裸模型名时，
+    引擎会**静默回落默认端点** → 可能把模型名发给完全不相干的厂商
+    （实测对方回 `HTTP 503 model_not_found`）。本接口把解析结果显式暴露给 UI，
+    消灭「异基座绿勾骗人」。
+
+    实现复用引擎同款 `resolve_model_ref()`（单一事实源），**禁止在此重写解析规则**。
+    响应体**不含任何密钥**。
+    """
+    _require_admin(x_admin_token)
+
+    from orchestrator import (
+        build_bare_index,
+        load_model_interfaces_and_endpoints,
+        resolve_model_ref,
+    )
+
+    eps_list, if_list, _gw, default_id = load_model_interfaces_and_endpoints()
+    endpoints = {e["id"]: e for e in eps_list}
+    interfaces = {i["id"]: i for i in if_list}
+    bare = build_bare_index(interfaces)
+
+    items: List[Dict[str, Any]] = []
+
+    def _probe(path: str, model: Any) -> None:
+        m = (model or "").strip() if isinstance(model, str) else ""
+        if not m:
+            return
+        try:
+            eid, real, _cfg, matched, disambiguated = resolve_model_ref(
+                m, endpoints, interfaces, default_id, bare
+            )
+            items.append({
+                "path": path,
+                "model": m,
+                "endpoint_id": eid,
+                "real_model": real,
+                "matched": matched,
+                "disambiguated": disambiguated,
+                "error": None,
+            })
+        except Exception as exc:                      # 诚实暴露，不吞
+            items.append({
+                "path": path,
+                "model": m,
+                "endpoint_id": None,
+                "real_model": None,
+                "matched": False,
+                "disambiguated": False,
+                "error": str(exc),
+            })
+
+    for role, cfg in (payload.roles or {}).items():
+        _probe(f"roles.{role}", (cfg or {}).get("model"))
+    for gate, cfg in (payload.gates or {}).items():
+        _probe(f"gates.{gate}", (cfg or {}).get("model"))
+    if payload.eval:
+        _probe("eval", payload.eval.get("model"))
+
+    return {
+        "items": items,
+        "default_endpoint_id": default_id,
+        "endpoint_ids": sorted(endpoints),
+        "interface_ids": sorted(interfaces),
+        "note": (
+            "base 只是来源标签、不参与路由；真正决定厂商的是 model 能否命中接口 id。"
+            "matched=false 表示未命中接口、已回落默认端点（依赖端点顺序，属高危写法）。"
+        ),
     }
 
 
@@ -867,6 +959,28 @@ import yaml as _yaml
 # 公开 router：承载无需 admin token 的端点（提交页用的 /api/v1/templates）
 public_router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# 账号作用域读接口的鉴权（DESIGN_subaccount_model_isolation.md §6-补充）
+#
+# 背景（真机复现的跨账号配置泄漏）：下列 6 个只读接口原先挂在 `public_router` 上、
+# **完全无鉴权**。FastAPI 里没有鉴权依赖 → `tenancy` 的 ContextVar 从未被设置 →
+# 资源根在 `RAT_LEGACY_GLOBAL=1` 下回落到仓库全局目录（= 主账号的 config/）。
+# 后果实测：**用子账号 wendy1 的浏览器调 GET /api/v1/models，返回的是主账号的模型清单**
+# （auto-chat / LongCat-2.0 / new-api 网关动态模型 / 主账号的 custom provider）。
+#
+# 这不是"公开数据"，是跨账号配置泄漏。故：账号作用域的配置读接口一律要求登录，
+# 并借 `get_current_account` 在同一依赖里完成 `set_current_account`。
+# 前端对应的裸 `fetch` 必须改走 `authFetch` / `api`（否则 401 → 级联登出）。
+# ---------------------------------------------------------------------------
+from .auth import get_current_account  # noqa: E402  (置于此处：需先定义 public_router 之上的导入顺序无碍，但保持就近可读)
+from .models import Account  # noqa: E402
+
+
+async def _tenant_required(_acc: Account = Depends(get_current_account)) -> Account:
+    """把「必须已登录」表达成一个具名依赖，便于 6 个端点统一引用与后续审计。"""
+    return _acc
+
+
 LEGACY_TEMPLATES_DIR = BASE / "templates"
 
 
@@ -1053,8 +1167,8 @@ class TemplatePut(BaseModel):
 
 
 @public_router.get("/templates")
-async def public_list_templates() -> Dict[str, Any]:
-    """公开列表（提交页 TemplateSelect 用，无 admin token）。"""
+async def public_list_templates(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
+    """账号作用域的模板列表（提交页 TemplateSelect 用）。**需登录**——见 public_router 顶部注释。"""
     items = [_template_item(n) for n in _template_names()]
     return {"items": items, "total": len(items)}
 
@@ -1265,7 +1379,7 @@ def _library_item(a: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @public_router.get("/agents-library")
-async def public_list_agents_library() -> Dict[str, Any]:
+async def public_list_agents_library(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
     """公开列表（智能体市场页用，无 admin token）。"""
     items = [_library_item(a) for a in _load_library_agents()]
     return {
@@ -1591,7 +1705,7 @@ def _plugin_item(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @public_router.get("/plugins")
-async def public_list_plugins() -> Dict[str, Any]:
+async def public_list_plugins(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
     """公开列表（数据源市场页用，无 admin token）。"""
     from tools.data_sources import load_data_sources
 
@@ -1652,7 +1766,7 @@ def _models_meta() -> Dict[str, Any]:
             "cached": False,
             "disabled": True,
         }
-        _models_meta()[key] = m
+        _MODELS_META[key] = m
     return m
 
 logger = logging.getLogger(__name__)
@@ -1776,8 +1890,12 @@ def _load_model_interfaces() -> List[Dict[str, Any]]:
 
 
 @public_router.get("/models")
-async def public_list_models() -> Dict[str, Any]:
-    """公开列表（ChatEntry 模型接口下拉用，无 admin token）。
+async def public_list_models(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
+    """当前账号可用的模型接口列表（ChatEntry 模型下拉用）。**需登录**。
+
+    为什么必须鉴权：本接口读的是**当前账号**的 `config/models.yaml` + 自定义 provider。
+    一旦无鉴权，就没有租户上下文 → 会读到全局/主账号的配置 → 子账号的模型下拉里出现
+    主账号的 new-api 网关模型（跨账号配置泄漏，实测复现）。见 public_router 顶部注释。
 
     响应 meta 诚实暴露网关状态：gateway_ok / gateway_error / gateway_disabled，
     前端据此区分"网关模型已加载"与"降级本地接口"。
@@ -2089,7 +2207,7 @@ def _skill_item(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @public_router.get("/skills")
-async def public_list_skills() -> Dict[str, Any]:
+async def public_list_skills(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
     """公开列表（技能市场页用，无 admin token）。不泄露 prompt 片段文本。"""
     items = [_skill_item(s) for s in _sk_load()]
     return {
@@ -2315,7 +2433,7 @@ def _channel_item(c: Dict[str, Any], public: bool = False) -> Dict[str, Any]:
 
 
 @public_router.get("/channels")
-async def public_list_channels() -> Dict[str, Any]:
+async def public_list_channels(_acc: Account = Depends(_tenant_required)) -> Dict[str, Any]:
     """公开列表（渠道市场页用，无 admin token）。不泄露 endpoint。"""
     items = [_channel_item(c, public=True) for c in _ch_load()]
     return {
@@ -2873,3 +2991,103 @@ async def admin_reject_expert_proposal(
     except experts.ExpertError as e:
         raise HTTPException(status_code=404, detail={"message": str(e)})
     return {"ok": True, **res}
+
+
+# ---------------------------------------------------------------------------
+# 统一审核中心（Review Center）：聚合三类待审核项 + 待推送变更集决策
+# 设计：DESIGN_review_center.md（决策权在老板 UI；push 由宿主 AI 代理执行）
+# ---------------------------------------------------------------------------
+class ReviewRejectReq(BaseModel):
+    reason: str = ""
+
+
+class ReviewPushedReq(BaseModel):
+    pushed_ref: str = ""
+
+
+@router.get("/admin/review/queue")
+async def admin_review_queue(x_admin_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """聚合三类待老板审核项：技能提案 / 专家提案 / 待推送变更集。"""
+    _require_admin(x_admin_token)
+    _ensure_tools_path()
+    from tools import skill_importer, experts, review_queue
+
+    items: List[Dict[str, Any]] = []
+    for p in skill_importer.list_proposals():
+        items.append({
+            "kind": "skill_proposal",
+            "id": p.get("id"),
+            "title": p.get("name"),
+            "level": p.get("level"),
+            "status": "pending",
+            "decision": None,
+            "detail": p,
+        })
+    for p in experts.list_expert_proposals():
+        items.append({
+            "kind": "expert_proposal",
+            "id": p.get("id"),
+            "title": p.get("name"),
+            "level": p.get("level"),
+            "status": "pending",
+            "decision": None,
+            "detail": p,
+        })
+    for it in review_queue.list_items():
+        entry = dict(it)
+        entry["kind"] = "pending_push"
+        items.append(entry)
+
+    counts = {
+        "skill_proposal": sum(1 for x in items if x["kind"] == "skill_proposal"),
+        "expert_proposal": sum(1 for x in items if x["kind"] == "expert_proposal"),
+        "pending_push": sum(1 for x in items if x["kind"] == "pending_push"),
+    }
+    counts["total"] = len(items)
+    return {"ok": True, "items": items, "counts": counts}
+
+
+@router.post("/admin/review/queue/{item_id}/approve")
+async def admin_review_approve(item_id: str, x_admin_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """待推送变更集：记录老板批准（仅写决策；真正 push 由宿主 AI 代理消费后执行）。"""
+    operator = _require_admin(x_admin_token)
+    _ensure_tools_path()
+    from tools import review_queue
+
+    try:
+        entry = review_queue.approve(item_id, operator)
+    except review_queue.ReviewQueueError as e:
+        raise HTTPException(status_code=404, detail={"message": str(e)})
+    return {"ok": True, **entry}
+
+
+@router.post("/admin/review/queue/{item_id}/reject")
+async def admin_review_reject(
+    item_id: str, body: ReviewRejectReq, x_admin_token: Optional[str] = Header(None)
+) -> Dict[str, Any]:
+    """待推送变更集：打回（记录原因；不推送）。"""
+    _require_admin(x_admin_token)
+    _ensure_tools_path()
+    from tools import review_queue
+
+    try:
+        entry = review_queue.reject(item_id, body.reason)
+    except review_queue.ReviewQueueError as e:
+        raise HTTPException(status_code=404, detail={"message": str(e)})
+    return {"ok": True, **entry}
+
+
+@router.post("/admin/review/queue/{item_id}/mark-pushed")
+async def admin_review_mark_pushed(
+    item_id: str, body: ReviewPushedReq, x_admin_token: Optional[str] = Header(None)
+) -> Dict[str, Any]:
+    """宿主 AI 代理 push 完成后回写（闭环；UI 显示已推送 + remote ref）。"""
+    _require_admin(x_admin_token)
+    _ensure_tools_path()
+    from tools import review_queue
+
+    try:
+        entry = review_queue.mark_pushed(item_id, body.pushed_ref)
+    except review_queue.ReviewQueueError as e:
+        raise HTTPException(status_code=404, detail={"message": str(e)})
+    return {"ok": True, **entry}

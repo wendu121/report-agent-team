@@ -101,3 +101,12 @@ export async function acceptProposal(pid: string): Promise<void> {
 export async function rejectProposal(pid: string): Promise<void> {
   await api.delete(`/admin/experts/proposals/${encodeURIComponent(pid)}`);
 }
+
+// 审核中心统一入口使用（命名与 skillService 对齐：accept* / reject*）。
+export async function acceptExpertProposal(pid: string): Promise<void> {
+  await api.post(`/admin/experts/proposals/${encodeURIComponent(pid)}/accept`);
+}
+
+export async function rejectExpertProposal(pid: string): Promise<void> {
+  await api.delete(`/admin/experts/proposals/${encodeURIComponent(pid)}`);
+}

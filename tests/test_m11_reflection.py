@@ -16,7 +16,10 @@ import tools.reflection as reflection  # noqa: E402
 @pytest.fixture
 def tmp_cfg(tmp_path, monkeypatch):
     """把反思落库路径重定向到临时目录，避免污染真实 config/。"""
-    monkeypatch.setattr(reflection, "REFLECTIONS_CFG", tmp_path / "reflections.proposed.yaml")
+    # 多租户改造后路径解析改走惰性函数 `_reflections_cfg()`（旧常量 REFLECTIONS_CFG 已删除），
+    # monkeypatch 必须打在函数上，打常量会 AttributeError。
+    monkeypatch.setattr(reflection, "_reflections_cfg",
+                        lambda: tmp_path / "reflections.proposed.yaml")
     return tmp_path
 
 

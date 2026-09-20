@@ -116,6 +116,10 @@ class GateCompleteEvent(BaseModel):
     eval_score: float
     problem_points: list[str] = []
     debug_state: Optional[dict] = None
+    # M13-gate-degradation：闸降级必须可区分（详见 DESIGN_gate_degradation_visibility.md）。
+    # 可选而非必填，避免破坏既有事件契约；缺失时前端按 reason 文本兜底推断。
+    review_status: Optional[Literal["llm_reviewed", "code_verified", "degraded_unavailable"]] = None
+    eval_score_source: Optional[Literal["gate_llm", "independent_scorer"]] = None
 
 
 class ReworkTriggerEvent(BaseModel):
@@ -271,7 +275,9 @@ async def emit_gate_complete(
     reason: str,
     eval_score: float,
     problem_points: list = None,
-    debug_state: dict = None
+    debug_state: dict = None,
+    review_status: Optional[str] = None,
+    eval_score_source: Optional[str] = None
 ):
     """推送 gate_complete 事件"""
     event = GateCompleteEvent(
@@ -283,7 +289,9 @@ async def emit_gate_complete(
         reason=reason,
         eval_score=eval_score,
         problem_points=problem_points or [],
-        debug_state=debug_state
+        debug_state=debug_state,
+        review_status=review_status,
+        eval_score_source=eval_score_source
     )
     await manager.broadcast(task_id, event.dict())
 

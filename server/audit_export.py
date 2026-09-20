@@ -19,12 +19,79 @@ from .models import Task
 # ============================================================================
 
 
+_GATE_FIELDS = ("decision", "reason", "eval_score", "review_status", "eval_score_source",
+                "problem_points", "gate", "round")
+_EVENT_FIELDS = ("event", "agent", "gate", "reason", "round")
+
+
+def _as_dt(v):
+    """字符串时间戳 → datetime；已是 datetime 原样返回；解析失败置 None（不抛）。"""
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001 —— 审计导出不应因一条脏时间而整个失败
+        return None
+
+
+def _shadow(obj, fields):
+    """把 pydantic 的 gate/event 投影成生成器期望的形状（含 datetime 化时间戳）。"""
+    from types import SimpleNamespace
+    data = {f: getattr(obj, f, None) for f in fields}
+    data["timestamp"] = _as_dt(getattr(obj, "timestamp", None))
+    return SimpleNamespace(**data)
+
+
+class _ApiTaskView:
+    """把 API 的 TaskResponse 适配成生成器期望的 server.models.Task 形状。
+
+    为什么需要这个类：生成器当初按 **DB 模型**写（task.gate_reviews / task.topic / task.scope …），
+    而服务端点 `_owned_task` 返回的是 **TaskResponse**（pydantic：gate 记录在
+    `routing_state.gate_review_history`、主题在 `user_task.topic`）。两侧形状不一致，
+    正是 `/audit-export` 一直只返回 TODO 临时 JSON、生成器沦为死代码的原因。
+
+    适配原则：**不改生成器**（它仍服务 DB 模型），只在入口做一层只读视图。
+    status 统一转成字符串值——metadata.json 要 json.dumps，枚举会 TypeError。
+    """
+
+    def __init__(self, t):
+        rs = getattr(t, "routing_state", None)
+        ut = getattr(t, "user_task", None)
+        self.task_id = t.task_id
+        self.status = getattr(getattr(t, "status", None), "value", getattr(t, "status", None))
+        self.created_at = getattr(t, "created_at", None)
+        self.updated_at = getattr(t, "updated_at", None)
+        self.report_markdown = getattr(t, "report_markdown", None) or ""
+        # 生成器对 gate/event 调 `timestamp.isoformat()`（DB 模型是 DateTime 列），
+        # 但 TaskResponse 里 timestamp 是**字符串** → 直接传会 AttributeError。
+        # 故逐条投影成 SimpleNamespace 并把时间还原成 datetime（解析失败置 None，不抛）。
+        self.gate_reviews = [_shadow(g, _GATE_FIELDS)
+                             for g in (getattr(rs, "gate_review_history", None) or [])]
+        self.engine_events = [_shadow(e, _EVENT_FIELDS)
+                              for e in (getattr(rs, "engine_events", None) or [])]
+        self.prior_versions = getattr(t, "prior_versions", None) or {}
+        self.retrieval_records = list(getattr(t, "retrieval_records", None) or [])
+        self.analysis_conclusions = list(getattr(t, "analysis_conclusions", None) or [])
+        self.draft_segments = list(getattr(t, "draft_segments", None) or [])
+        self.topic = getattr(ut, "topic", None) or ""
+        self.scope = list(getattr(ut, "scope", None) or [])
+        self.output_format_spec = getattr(ut, "output_format_spec", None) or ""
+        self.constraints = list(getattr(ut, "constraints", None) or [])
+
+
 class AuditExportGenerator:
     """审计包生成器"""
 
     def __init__(self, task: Task):
         self.task = task
         self.timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+    @classmethod
+    def from_api_task(cls, task) -> "AuditExportGenerator":
+        """从 API 的 TaskResponse 构造（端点侧入口）。"""
+        return cls(_ApiTaskView(task))
 
     def generate_zip(self) -> bytes:
         """生成审计包 ZIP（二进制）"""
@@ -44,6 +111,8 @@ class AuditExportGenerator:
                     "decision": gr.decision,
                     "reason": gr.reason,
                     "eval_score": gr.eval_score,
+                    "review_status": gr.review_status,
+                    "eval_score_source": gr.eval_score_source,
                     "problem_points": gr.problem_points or [],
                     "gate": gr.gate,
                     "round": gr.round,

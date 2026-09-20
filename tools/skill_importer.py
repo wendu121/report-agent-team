@@ -98,7 +98,10 @@ ALLOWED_PLACEHOLDERS = {"query", "topic", "task", "input", "term"}
 JSONPATH_RE = re.compile(r"^\$(\.[A-Za-z0-9_-]+|\[\d+\])+$")
 
 SKILL_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-VALID_ROLES = ("researcher", "analyst", "writer")
+# M12-4：新增 "chat"（对话入口）。DESIGN_M12 §7 的 V1 要求「下一个 /chat 的 system prompt
+# 实测能读到该技能」，若没有 chat 这个 role，导入的技能永远进不了对话入口 —— 该验收项
+# 在 M12-1/2 里实际是打折通过的（只验了 build_skill_context("researcher")）。
+VALID_ROLES = ("chat", "researcher", "analyst", "writer")
 VALID_TARGETS = ("skill", "tool", "datasource", "expert")
 
 UA = {"User-Agent": "report-agent-team-skill-importer/1.0"}
@@ -584,7 +587,8 @@ def build_spec(source: Dict[str, Any], level: str, reasons: List[str],
         "name": (fm.get("name") or name or _first_heading(body) or auto_id).strip(),
         "description": (fm.get("description") or _first_para(body))[:200],
         "target": "skill",
-        "target_roles": target_roles or ["researcher"],
+        # M12-4：默认含 "chat"，否则 V1（「下一个 /chat 能读到该技能」）永不达标。
+        "target_roles": target_roles or ["chat", "researcher"],
         "payload": {"markdown": source["text"].strip()},
         "provenance": {
             "source_url": source["final_url"],
@@ -668,7 +672,13 @@ def _backup() -> Optional[str]:
     dest = _backup_dir() / stamp
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "skills.yaml").write_text(_skills_yaml().read_text(encoding="utf-8"), encoding="utf-8")
-    return str(dest.relative_to(BASE))
+    # 必须相对**租户根**而非写死的模块常量 BASE：多租户改造后资源根由 tenancy 解析，
+    # 当 TENANTS_ROOT 指向别处（容器挂载 / 测试隔离）时 relative_to(BASE) 会 ValueError。
+    # 兜底：万一确实不在租户根下，退回绝对路径，绝不因「算相对路径」让回滚失败。
+    try:
+        return str(dest.relative_to(_tenant_root()))
+    except ValueError:
+        return str(dest)
 
 
 def _existing_index(data) -> Dict[str, Any]:
@@ -680,7 +690,14 @@ def _existing_index(data) -> Dict[str, Any]:
 
 
 def _idempotent(spec: Dict[str, Any]) -> bool:
-    """同 (source_url, sha256) 已存在 → True（不重复落盘，V6）。"""
+    """同 (id, source_url, sha256) 已存在 → True（不重复落盘，V6）。
+
+    注意：必须按 skill id 收敛。早期实现只比对 (source_url, sha256)，导致
+    「内容相同但 id 不同」的两个技能被误判为重复——接受第二个提案时静默
+    no-op、返回 unchanged、却把提案删掉、技能始终不落盘（审批卡显示成功、
+    实际零落盘）。现改为同一 id 且同源同内容才跳过（V6.1 修复）。
+    """
+    sid = spec.get("id")
     if not _skills_yaml().exists():
         return False
     try:
@@ -692,10 +709,133 @@ def _idempotent(spec: Dict[str, Any]) -> bool:
     url = (spec.get("provenance") or {}).get("source_url")
     sha = (spec.get("provenance") or {}).get("sha256")
     for s in data.get("skills") or []:
+        if s.get("id") != sid:
+            continue  # 不同 id 的技能即使同源同内容也不算重复
         prov = (s or {}).get("provenance") or {}
         if prov.get("source_url") == url and prov.get("sha256") == sha:
             return True
     return False
+
+
+def _condense_markdown(raw: str, spec: dict) -> str:
+    """把（可能很大的）原始 skill markdown 裁成 ≤5KB 的精简索引版。
+
+    设计目标（DESIGN_skill_proposal_ui.md §后端）：去掉营销 banner 图 / 注册 CTA /
+    Postman 链接等噪音，保留结构化“可用 API 索引”（含 http 的列表项，去重、封顶 40 条），
+    并在头部加“调用方式”说明，保证注入 chat/researcher system prompt 时**保留可调用性**。
+
+    - `raw` 为空 → 返回占位说明（不冒充有内容）。
+    - 总字符数封顶 5000（len() 中文字符安全），超则在**词条边界**截断而非半句截断。
+    - 若原文 >5KB，末尾追加一行注明这是精简索引版（原始来源已裁剪，保留可调用性）。
+    """
+    name = (spec.get("name") or "未命名技能").strip()
+
+    # 防御：原始来源为空，绝不冒充有内容
+    if not raw or not raw.strip():
+        return (
+            f"# {name}\n\n"
+            "（本技能没有提供正文内容，原始来源为空，无法生成精简索引。）"
+        )
+
+    # 头部描述：取 description 首段（或一句话用途），截断到 120 字
+    description = (spec.get("description") or "").strip()
+    first_para = ""
+    for line in description.splitlines():
+        line = line.strip()
+        if line:
+            first_para = line
+            break
+    if not first_para:
+        first_para = name  # 退路：用技能名作为一句话用途
+    if len(first_para) > 120:
+        first_para = first_para[:120]
+
+    # ---- 逐行清洗：删图片行 / 裸图 URL 行 / 营销 CTA 行 ----
+    img_re = re.compile(r"!\[[^\]]*\]\([^)]*\)")  # 删除整行 markdown 图片
+    # 营销 CTA 关键词：保留 api.apilayer.com/products/... 这类产品 URL（它们是 API 索引）
+    cta_re = re.compile(r"Sign up|postman\.com|app\.apilayer\.com|🎉|🥳", re.I)
+
+    def _is_bare_image_url(s: str) -> bool:
+        # 整行仅一个 URL 且指向图片资源 / raw.githubusercontent 图片托管 → 删
+        if not re.fullmatch(r"https?://\S+", s):
+            return False
+        low = s.lower()
+        return ("raw.githubusercontent.com" in low
+                or low.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")))
+
+    cleaned: List[str] = []
+    for line in raw.splitlines():
+        s = line.strip()
+        if img_re.search(line):
+            continue
+        if _is_bare_image_url(s):
+            continue
+        if cta_re.search(line):
+            continue
+        cleaned.append(line)
+
+    # ---- 抽取含 http 的列表项作为“可用 API 索引”，去重、封顶 40 条 ----
+    api_index: List[Tuple[str, str]] = []
+    seen_urls = set()
+    for line in cleaned:
+        m = re.match(r"\s*[-*]\s*\[([^\]]+)\]\((https?://[^)\s]+)\)", line)
+        if m:
+            title, url = m.group(1).strip(), m.group(2).strip()
+        else:
+            m2 = re.match(r"\s*[-*]\s*(https?://\S+)", line)
+            if m2:
+                url = m2.group(1).strip()
+                title = url
+            else:
+                continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        api_index.append((title, url))
+        if len(api_index) >= 40:
+            break
+
+    note = ""
+    if len(raw) > 5000:
+        note = "\n\n（本技能为精简索引版，原始来源已裁剪，保留可调用性）"
+
+    head = (
+        f"# {name}\n\n"
+        f"{first_para}\n\n"
+        "## 调用方式\n"
+        "生成研报时若需下列领域数据，优先用 web_search / Tavily 检索对应公共 API 的实时数据，"
+        "并在研报中标注数据来源 URL。"
+    )
+
+    MAX = 5000
+    out = head
+    # 无 http 列表项来源：省略空「## 可用 API 索引」标题（NOTE-3.2）
+    if api_index:
+        out += "\n\n## 可用 API 索引\n"
+        for title, url in api_index:
+            entry = f"- [{title}]({url})\n"
+            # 在词条边界（整条）判断是否超 5000，不半句截断
+            if len(out) + len(entry) + len(note) > MAX:
+                break
+            out += entry
+    out = out.rstrip("\n") + note
+    return out
+
+
+def _should_condense(raw: str) -> bool:
+    """仅对「大体积 / 列表型」来源裁剪，保护自研小 prompt 技能不被裁成空壳（NOTE-3.3）。
+
+    判定：原文 >5KB，或含 ≥3 条 http 列表项（API 索引候选）。否则原样落盘。
+    L0 直装路径（import_skill 的非 L1 分支）也走 install_spec，若无此守卫会把
+    纯步骤/结构型的小 prompt 裁成「头部 + 空索引」，技能近乎失效。
+    """
+    if not raw or not raw.strip():
+        return False
+    if len(raw) > 5000:
+        return True
+    link_re = re.compile(r"\s*[-*]\s*(\[[^\]]+\]\((https?://[^)\s]+)\)|https?://\S+)")
+    count = sum(1 for line in raw.splitlines() if link_re.match(line))
+    return count >= 3
 
 
 def install_spec(spec: Dict[str, Any], operator: str = "system") -> Dict[str, Any]:
@@ -750,7 +890,10 @@ def install_spec(spec: Dict[str, Any], operator: str = "system") -> Dict[str, An
             data["skills"].append(entry)
 
         _skills_dir().mkdir(parents=True, exist_ok=True)
-        _atomic_write(md_path, spec["payload"]["markdown"])
+        md_text = spec["payload"]["markdown"]
+        if _should_condense(md_text):
+            md_text = _condense_markdown(md_text, spec)
+        _atomic_write(md_path, md_text)
         _atomic_write(_skills_yaml(), _dump(y, data))
     except Exception as e:  # noqa: BLE001
         if before is not None:

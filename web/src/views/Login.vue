@@ -45,7 +45,7 @@
       <div v-if="ok" class="note-ok">✓ {{ ok }}</div>
 
       <p v-if="mode === 'register'" class="hint">
-        注册后账号为「待审批」状态，需主账号在【设置 → 账号管理】通过后才能登录。
+        开放注册下，首个注册账号自动成为主账号并立即生效；其余账号为「待审批」状态，需主账号在【设置 → 账号管理】通过后才能登录。
       </p>
     </div>
   </div>
@@ -83,10 +83,16 @@ async function submit() {
       const redirect = (route.query.redirect as string) || '/';
       router.replace(redirect);
     } else {
-      await auth.register(username.value.trim(), password.value);
-      ok.value = '已提交注册，等待主账号审批。';
+      const acc = await auth.register(username.value.trim(), password.value);
+      // 首个注册账号为 main/active（立即可用）；其余为 sub/pending（需主账号审批）。
+      if (acc.role === 'main' && acc.status === 'active') {
+        ok.value = '注册成功！您是本系统的主账号，已自动激活，请用相同账号密码登录。';
+        ElMessage.success('注册成功，您已是主账号，可直接登录');
+      } else {
+        ok.value = '已提交注册，等待主账号审批。';
+        ElMessage.success('注册已提交，等待主账号审批');
+      }
       mode.value = 'login';
-      ElMessage.success('注册已提交，等待主账号审批');
     }
   } catch (e: any) {
     err.value = e?.payload?.data?.detail || e?.message || '操作失败';

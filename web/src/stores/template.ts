@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import type { TemplateInfo } from '@/types';
+import { authFetch } from '@/api/client';
 
 const API_BASE = '/api/v1';
 
@@ -15,7 +16,9 @@ export const useTemplateStore = defineStore('template', () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await fetch(`${API_BASE}/templates`);
+      // /templates 已纳入账号作用域（子账号隔离里程碑加了 _tenant_required），
+      // 必须走 authFetch 注入 Bearer，否则 401 → 提交页模板下拉对所有账号加载失败。
+      const res = await authFetch(`${API_BASE}/templates`);
       if (!res.ok) throw new Error(`加载模板失败：${res.status}`);
       const data = await res.json();
       templates.value = (data.items ?? []) as TemplateInfo[];

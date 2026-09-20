@@ -4,7 +4,7 @@ M6-2 产出：REST API 路由
 实现 API_SPEC.md §2 定义的所有 REST 接口
 """
 
-from fastapi import APIRouter, HTTPException, status, Response, Depends
+from fastapi import APIRouter, HTTPException, status, Response, Depends, Request
 from pydantic import BaseModel, Field, ValidationError
 from typing import Dict, List, Optional, Literal, Any
 from datetime import datetime
@@ -19,6 +19,7 @@ import uuid
 import json
 import asyncio
 import logging
+import threading
 import time
 import traceback
 
@@ -48,6 +49,14 @@ state_store = EngineStateStore(STATE_DIR)
 # 引擎跑在独立子进程，子进程内的 websocket.manager 是空连接表（跨进程共享不了），
 # 故事件经 JSONL 文件转交：子进程写 → 服务进程并发 tail → manager.broadcast。
 from .websocket import manager as _ws_manager
+
+# 输出渲染（DESIGN_OUTPUT_RENDERING.md v1.0）：doc_render 在渲染函数内部惰性 import
+# 文档库（python-docx / python-pptx / reportlab），故此处顶层导入不会让容器因缺库而启动失败。
+from urllib.parse import quote
+from .audit_export import AuditExportGenerator
+from tools.doc_render import (  # noqa: E402
+    RendererUnavailable, parse_markdown, render_docx, render_pdf, render_pptx,
+)
 
 
 async def _stream_engine_events(task_id: str, events_file: Path):
@@ -127,7 +136,14 @@ class GateReview(BaseModel):
     """Gate 审计记录"""
     decision: Literal["advance", "rework", "escalate"]
     reason: str
-    eval_score: float
+    # 可空：闸降级且独立评分器也失败时为 None。
+    # 历史上此处是必填非空 float，直接导致「降级 + 评分器失败」时整个任务投影 ValidationError
+    # （实测复现），详见 _coerce_routing_state 的说明。
+    eval_score: Optional[float] = None
+    # 本条闸记录的**依据来源**（与引擎侧 4 个分支 1:1）；历史数据缺失时由投影层按 reason 回填。
+    review_status: Optional[Literal["llm_reviewed", "code_verified", "degraded_unavailable"]] = None
+    # 分数来源：闸 LLM 自评 / 独立评分器。同一字段承载两种语义，必须可区分。
+    eval_score_source: Optional[Literal["gate_llm", "independent_scorer"]] = None
     problem_points: List[str]
     gate: str
     round: int
@@ -148,6 +164,64 @@ class RoutingState(BaseModel):
     rework_reason: Optional[str] = None
     gate_review_history: List[GateReview] = Field(default_factory=list)
     engine_events: List[EngineEvent] = Field(default_factory=list)
+
+
+# ============================================================================
+# 路由状态投影（M13-gate-degradation）
+# ============================================================================
+# 修一个**实测复现**的实缺：`GateReview.eval_score` 曾是必填非空 float，而闸降级且
+# 独立评分器也失败时引擎会给出 `eval_score=None` → 校验失败 → `RoutingState(**routing)`
+# 抛 ValidationError。两条路径都受害：
+#   ① 实时路径（POST /tasks 内更新任务）→ 任务详情页 500；
+#   ② 文件恢复路径（_load_task_from_file）→ 被外层 except 吞掉 → 任务被当成「不存在」。
+# 故：`eval_score` 改可空 + 统一经本函数投影，且对单条脏数据做隔离（不整批连坐）。
+
+_DEGRADED_REASON_MARKS = ("降级放行", "审核 LLM 不可用")
+
+
+def _coerce_gate_reviews(raw) -> list:
+    """把关记录 raw list 投影为 GateReview，单条隔离（策略对齐 _validate_records）。
+
+    历史任务的 output.json 里没有 `review_status`（本次新增）→ 按 `reason` 文本回填，
+    使「这道闸到底审没审」对历史数据同样可见（兼容逻辑收敛在后端一处，前端零判断）。
+    `eval_score_source` 缺失时**不强行推断**（历史数据无从判断），保持 None。
+    """
+    out = []
+    if not raw:
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            print(f"⚠️ 丢弃形状非法的 gate_review（期望 dict，实为 {type(item).__name__}）")
+            continue
+        it = dict(item)
+        if not it.get("review_status"):
+            reason = str(it.get("reason") or "")
+            it["review_status"] = (
+                "degraded_unavailable"
+                if any(mk in reason for mk in _DEGRADED_REASON_MARKS)
+                else "llm_reviewed"
+            )
+        try:
+            out.append(GateReview(**it))
+        except Exception as e:
+            print(f"⚠️ 丢弃无法投影的 gate_review：{e}（原始：{str(it)[:200]}）")
+    return out
+
+
+def _coerce_routing_state(raw: dict) -> RoutingState:
+    """把引擎的 routing_state raw dict 投影为 RoutingState，**不因单条脏数据整体失败**。
+
+    本函数存在的直接原因：「闸降级 + 独立评分器失败 → eval_score=None → 整个任务投影崩」。
+    缺失的必需字段给安全默认值；脏条目单条丢弃并**显式告警**（不静默）。
+    """
+    r = dict(raw or {})
+    r.setdefault("round", 0)
+    r.setdefault("max_rounds", 0)
+    if r.get("status") not in {s.value for s in TaskStatus}:
+        r["status"] = TaskStatus.ESCALATED.value
+    r["gate_review_history"] = _coerce_gate_reviews(r.get("gate_review_history"))
+    r["engine_events"] = _validate_records(EngineEvent, r.get("engine_events"), "engine_events")
+    return RoutingState(**r)
 
 
 class RetrievalRecord(BaseModel):
@@ -561,7 +635,13 @@ async def create_task(request: CreateTaskRequest):
                     # 从引擎输出更新任务状态
                     routing = output.get("routing_state", {})
                     task.status = TaskStatus(routing.get("status", "running"))
-                    task.routing_state = RoutingState(**routing)
+                    # 统一经容错投影：闸降级且独立评分器也失败时 eval_score 为 None，
+                    # 曾因此让整个任务详情 500（详见 _coerce_routing_state 的说明）。
+                    try:
+                        task.routing_state = _coerce_routing_state(routing)
+                    except Exception as _proj_err:
+                        # 投影失败不得让任务详情消失：保留上一份状态并**显式告警**（不静默）
+                        print(f"❌ routing_state 投影失败（保留上一份状态）：{type(_proj_err).__name__}: {_proj_err}")
                     # 升级原因：引擎把它放在 routing_state.escalate_reason（或 rework_reason 兜底），
                     # 必须透传到 TaskResponse 顶层，复核页/时间线终态弹窗才能展示"错在那一步"。
                     if task.status == TaskStatus.ESCALATED:
@@ -732,7 +812,7 @@ def _load_task_from_file(task_id: str) -> Optional[TaskResponse]:
             created_at=mtime,
             updated_at=mtime,
             user_task=UserTask(**user_task_raw),
-            routing_state=RoutingState(**routing),
+            routing_state=_coerce_routing_state(routing),
             retrieval_records=_validate_records(RetrievalRecord, data.get("retrieval_records"), "retrieval_records"),
             analysis_conclusions=_validate_records(AnalysisConclusion, data.get("analysis_conclusions"), "analysis_conclusions"),
             draft_segments=_validate_records(DraftSegment, data.get("draft_segments"), "draft_segments"),
@@ -864,25 +944,109 @@ async def export_audit(task_id: str):
             ).dict()
         )
 
-    # TODO: M6-5 生成真实 ZIP 包
-    # 临时返回 JSON 响应
-    audit_data = {
-        "task_id": task_id,
-        "status": task.status.value,
-        "report_markdown": task.report_markdown or "待生成",
-        "gate_review_history": [g.dict() for g in task.routing_state.gate_review_history],
-        "prior_versions": task.prior_versions,
-        "user_task": task.user_task.dict(),
-        "engine_events": [e.dict() for e in task.routing_state.engine_events],
-        "note": "M6-5 待实现：真实 ZIP 打包"
-    }
+    # M6-5 真实 ZIP：生成器按 DB 模型写，端点手里是 TaskResponse →
+    # 经 AuditExportGenerator.from_api_task() 做形状适配（见 server/audit_export.py）。
+    generator = AuditExportGenerator.from_api_task(task)
+    zip_data = generator.generate_zip()
 
-    # 临时返回 JSON（M6-5 会替换为 ZIP）
-    return {
-        "message": "审计包待 M6-5 实现",
-        "task_id": task_id,
-        "audit_data": audit_data
-    }
+    return Response(
+        content=zip_data,
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(generator.get_filename())},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 研报下载（DESIGN_OUTPUT_RENDERING.md v1.0 · OR-3）
+# ---------------------------------------------------------------------------
+# 设计要点：
+#   - SoT 仍是 report_markdown；docx/pptx/pdf 是**下载时才渲染**的派生视图，引擎零改动。
+#   - 渲染库缺失必须 503 响亮失败，绝不返回空文件冒充成功（诚实边界）。
+_REPORT_FORMATS = {
+    "md": "text/markdown; charset=utf-8",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "pdf": "application/pdf",
+}
+_REPORT_RENDERERS = {"docx": render_docx, "pptx": render_pptx, "pdf": render_pdf}
+
+
+def _md_title(md: str, fallback: str) -> str:
+    """取 md 首个 # 标题作文档标题，取不到则用主题兜底。"""
+    m = re.search(r"^#\s+(.+)$", md or "", re.MULTILINE)
+    return (m.group(1).strip() if m else "") or fallback
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 5987：ASCII 兜底名 + UTF-8 编码名（中文主题不乱码）。"""
+    ascii_name = re.sub(r"[^\w.-]+", "_", filename, flags=re.ASCII) or "report"
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(filename)}'
+
+
+@router.get(
+    "/tasks/{task_id}/report",
+    responses={200: {"description": "研报文件（md / docx / pptx / pdf）"}},
+)
+async def download_report(task_id: str, format: str = "md"):
+    """研报下载（GET /tasks/{id}/report?format=md|docx|pptx|pdf）
+
+    - 越权一律 404（_owned_task 按 owner 隔离，不返 403 防枚举探测）；
+    - 仅 done/escalated 可下载，否则 409 TASK_NOT_COMPLETED；
+    - 格式非法 400 UNSUPPORTED_FORMAT；渲染库缺失 503 RENDERER_UNAVAILABLE。
+    """
+    task = _owned_task(task_id)
+
+    if task.status not in [TaskStatus.DONE, TaskStatus.ESCALATED]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ErrorResponse(
+                error="TASK_NOT_COMPLETED",
+                message="任务未完成",
+                timestamp=datetime.utcnow().isoformat(),
+            ).dict(),
+        )
+
+    fmt = (format or "md").lower().strip()
+    if fmt not in _REPORT_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ErrorResponse(
+                error="UNSUPPORTED_FORMAT",
+                message=f"不支持的格式：{format}（可选 md / docx / pptx / pdf）",
+                timestamp=datetime.utcnow().isoformat(),
+            ).dict(),
+        )
+
+    md = task.report_markdown or ""
+    topic = getattr(task.user_task, "topic", None) or "report"
+
+    if fmt == "md":
+        data = md.encode("utf-8")
+    else:
+        meta = {
+            "title": _md_title(md, topic),
+            "topic": topic,
+            "task_id": task_id,
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        }
+        try:
+            data = _REPORT_RENDERERS[fmt](parse_markdown(md), meta)
+        except RendererUnavailable as e:
+            # 缺库即如实报 503，绝不返回空字节冒充成功
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=ErrorResponse(
+                    error="RENDERER_UNAVAILABLE",
+                    message=str(e),
+                    timestamp=datetime.utcnow().isoformat(),
+                ).dict(),
+            )
+
+    return Response(
+        content=data,
+        media_type=_REPORT_FORMATS[fmt],
+        headers={"Content-Disposition": _content_disposition(f"{topic}-{task_id}.{fmt}")},
+    )
 
 
 # 旧「调试用」list_tasks（返回全进程任务、不按 owner 过滤）已移除：
@@ -917,7 +1081,20 @@ class ChatResponse(BaseModel):
     # 供前端展示「他能自主调工具」，直观回应 boss 诉求。
     tool_calls: List[str] = []
     # 工具产出的真实素材（检索记录 / MCP 结果），供前端溯源展示。
+    # 占位数据（is_mock）已在 chat_agent._build_sources 阶段剔除，不在此出现。
     sources: List[dict] = []
+    # 诚实降级（DESIGN_source_honesty §3.3）：本次未参与检索的数据源 / 被剔除的占位数据，
+    # 逐条人类可读告警（含修复指引）。前端须醒目展示——用户有权知道「检索面不完整」。
+    source_warnings: List[str] = []
+    # sources 是否为纯真实来源。False → 前端不应把 sources 当引用展示（宁可少展示）。
+    sources_are_real: bool = True
+    # 用户中途「停止」→ True。此时 reply 为空、**本轮不写库**（用户消息也不写），
+    # 前端据此把文本还回输入框让用户改字重发。见 DESIGN_chat_interrupt_edit.md §3.1
+    cancelled: bool = False
+    # 本次落库生成的消息 id，供前端「编辑历史消息」时精确定位要截断的起点。
+    # 持久化降级时保持 None（前端会走「本地删除即可」的分支）。
+    user_message_id: Optional[str] = None
+    assistant_message_id: Optional[str] = None
 
 
 # 每账号单例（懒加载）：构造 NewApiLLMClient 较重（读 yaml + 解析接口），复用一次。
@@ -1436,9 +1613,12 @@ def _audit_admin_change(action: str, target: str, meta: dict) -> None:
 # ============================================================================
 
 from server.database import get_async_session_dependency, get_async_session
-from server.models import ChatSession, ChatMessage, ChatSessionMemory
+from server.models import (
+    ChatSession, ChatMessage, ChatSessionMemory,
+    Task, RoutingState, EngineEvent, GateReview,
+)
 from server import tenancy
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, delete
 
 
 def _current_aid() -> Optional[str]:
@@ -1738,6 +1918,219 @@ async def set_session_memory(session_id: str, payload: dict):
     return await _set_session_memory(session_id, key, value)
 
 
+class TruncateRequest(BaseModel):
+    """截断起点：删除该消息**及其之后**的所有消息。"""
+    from_message_id: str
+
+
+async def _truncate_from_message(session_id: str, from_message_id: str):
+    """删除 from_message_id 这条消息及其之后的全部消息（含 assistant 回复）。
+
+    为什么必须是「真删」而不是只改前端：用户发现自己发错了字时要「改」，
+    如果只把页面上的气泡换掉、库里仍留着错的那条，那么
+      (a) 刷新会话错字会「复活」；
+      (b) 后续每轮对话，模型仍然看得到那条错的历史（history 从 DB 读），
+          「改过了」就成了假修正。
+    设计依据：DESIGN_chat_interrupt_edit.md §3.2。
+    """
+    async with get_async_session() as session:
+        await _owned_session(session_id, session)  # 越权/不存在 → 404（不返 403，防枚举）
+        rows = (await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at)
+        )).scalars().all()
+        idx = next((i for i, m in enumerate(rows) if m.id == from_message_id), None)
+        if idx is None:
+            # 找不到就 fail loud：静默 no-op 会让前端以为「已经删了」而继续发，
+            # 结果历史里留下两条并存的用户消息（假修正的另一种形态）。
+            raise HTTPException(status_code=404, detail="消息不存在或不属于该会话")
+        victims = rows[idx:]
+        for m in victims:
+            await session.delete(m)
+        await session.commit()
+        return {"ok": True, "deleted": len(victims)}
+
+
+@router.post("/chat/sessions/{session_id}/truncate")
+async def truncate_chat_session(session_id: str, payload: TruncateRequest):
+    """从指定消息开始截断会话历史（「编辑重发」的前置动作）"""
+    return await _truncate_from_message(session_id, payload.from_message_id)
+
+
+# ============================================================================
+# 历史记录 / 聊天记录 清理（DESIGN_chat_cleanup_time.md §2 K2 / K3-B）
+# ============================================================================
+
+def _audit_task_change(action: str, target: str, meta: dict) -> None:
+    """任务删除审计（追加写 .audit/tasks.log.jsonl，绝不打密钥/正文）。"""
+    try:
+        from server import tenancy
+        audit_dir = tenancy.audit_path("tasks")
+    except Exception:
+        audit_dir = BASE_DIR / ".audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    log = audit_dir / "tasks.log.jsonl"
+    rec = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "action": action,
+        "target": target,
+        "meta": meta,
+    }
+    try:
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ task audit 写盘失败: {e}")
+
+
+def _remove_task_files(task_id: str) -> None:
+    """删除任务的引擎状态文件（.engine_state/ 与 outputs/ 下按 task_id 前缀，避免误删他人）。
+
+    运行时任务持久化在 _tasks 字典 + .engine_state/{id}_*.json(l) 文件，
+    DB tasks 表在运行时并不落盘（属迁移期 dead schema），故删除必须同时清这两处。
+    """
+    sdir = _task_state_dir()
+    for name in (f"{task_id}_input.json", f"{task_id}_output.json", f"{task_id}_events.jsonl"):
+        p = sdir / name
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    out_dir = BASE_DIR / "outputs"
+    if out_dir.exists():
+        for p in out_dir.glob(f"{task_id}_*"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+async def _delete_task(task_id: str) -> dict:
+    """删除单个研报任务（历史记录）。
+
+    - 归属严格式 fail-closed：owner 不匹配或不存在一律 404（不返 403，防枚举探测）。
+    - status ∈ {running, rework} → 409（运行中禁止删，防孤儿引擎状态）。
+    - 删除内存态 / 状态文件 / DB 关联行（RoutingState·EngineEvent·GateReview），写审计。
+    """
+    # 归属 + 存在性校验（fail-closed：越权或不存在 → 404）
+    task = _owned_task(task_id)
+    if task.status in ("running", "rework"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ErrorResponse(
+                error="TASK_BUSY",
+                message="任务正在运行或返工中，暂不可删除",
+                timestamp=datetime.utcnow().isoformat(),
+            ).dict(),
+        )
+    # 1) 内存态移除
+    _tasks.pop(task_id, None)
+    # 2) 状态文件清理
+    _remove_task_files(task_id)
+    # 3) DB 关联表清理：RoutingState/EngineEvent/GateReview 即便无父行也清孤儿行；
+    #    父行（tasks）存在时 ORM 级联冗余但显式更安全。
+    async with get_async_session() as dbs:
+        await dbs.execute(delete(RoutingState).where(RoutingState.task_id == task_id))
+        await dbs.execute(delete(EngineEvent).where(EngineEvent.task_id == task_id))
+        await dbs.execute(delete(GateReview).where(GateReview.task_id == task_id))
+        row = await dbs.get(Task, task_id)
+        if row is not None:
+            await dbs.delete(row)
+        await dbs.commit()
+    # 4) 审计
+    _audit_task_change("delete_task", task_id, {"status": task.status})
+    return {"ok": True, "task_id": task_id}
+
+
+async def _clear_tasks() -> dict:
+    """一键清空当前账号全部非运行中任务，返回 {ok, deleted, skipped_running}。"""
+    aid = _current_aid()
+    # 收集当前账号全部任务 id（内存态 + 文件态）
+    candidate_ids: set = set(_tasks.keys())
+    sdir = _task_state_dir()
+    if sdir.exists():
+        for p in sdir.glob("*_output.json"):
+            candidate_ids.add(p.name[: -len("_output.json")])
+        for p in sdir.glob("*_input.json"):
+            candidate_ids.add(p.name[: -len("_input.json")])
+
+    deleted = 0
+    skipped_running = 0
+    for tid in candidate_ids:
+        t = _tasks.get(tid)
+        if t is not None:
+            if aid and t.owner_id and t.owner_id != aid:
+                continue
+            st = t.status
+        else:
+            rest = _load_task_from_file(tid)
+            if rest is None:
+                continue
+            if aid and rest.owner_id and rest.owner_id != aid:
+                continue
+            st = rest.status
+        if st in ("running", "rework"):
+            skipped_running += 1
+            continue
+        _tasks.pop(tid, None)
+        _remove_task_files(tid)
+        async with get_async_session() as dbs:
+            await dbs.execute(delete(RoutingState).where(RoutingState.task_id == tid))
+            await dbs.execute(delete(EngineEvent).where(EngineEvent.task_id == tid))
+            await dbs.execute(delete(GateReview).where(GateReview.task_id == tid))
+            row = await dbs.get(Task, tid)
+            if row is not None:
+                await dbs.delete(row)
+            await dbs.commit()
+        deleted += 1
+    return {"ok": True, "deleted": deleted, "skipped_running": skipped_running}
+
+
+async def _clear_sessions() -> dict:
+    """一键清空当前账号全部聊天会话（连带删除消息与跨会话记忆，防孤儿行）。"""
+    aid = _current_aid()
+    async with get_async_session() as session:
+        stmt = select(ChatSession.id)
+        if aid:
+            stmt = stmt.where(ChatSession.owner_id == aid)
+        ids = list((await session.execute(stmt)).scalars().all())
+        if ids:
+            # 显式批量删子表（ChatMessage / ChatSessionMemory 对 session 为普通 FK 列，
+            # 即便 DB 不强制 ondelete 也清掉，杜绝孤儿行），再删 session。
+            await session.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(ids)))
+            await session.execute(delete(ChatSessionMemory).where(ChatSessionMemory.session_id.in_(ids)))
+            await session.execute(delete(ChatSession).where(ChatSession.id.in_(ids)))
+            await session.commit()
+    return {"ok": True, "deleted": len(ids)}
+
+
+@router.delete("/tasks/{task_id}", response_model=dict)
+async def delete_task(task_id: str):
+    """删除单个研报任务（历史记录）。
+
+    - 归属严格式 fail-closed：owner 不匹配或不存在一律 404（不返 403，防枚举探测）。
+    - status ∈ {running, rework} → 409（运行中禁止删，防孤儿引擎状态）。
+    - 真实删除路径：移除 _tasks 内存态 + 删除 .engine_state/outputs 状态文件 + 显式清
+      RoutingState/EngineEvent/GateReview 孤儿行（运行时任务不落 DB，不存在 CASCADE 级联），写审计，
+      返回 {ok, task_id}。
+    """
+    return await _delete_task(task_id)
+
+
+@router.delete("/tasks", response_model=dict)
+async def clear_tasks():
+    """一键清空当前账号全部非运行中任务，返回 {ok, deleted, skipped_running}。"""
+    return await _clear_tasks()
+
+
+@router.delete("/chat/sessions", response_model=dict)
+async def clear_chat_sessions():
+    """一键清空当前账号全部聊天会话（连带删除消息与跨会话记忆），返回 {ok, deleted}。"""
+    return await _clear_sessions()
+
+
 async def _fetch_recent_session_memories(exclude_session_id: str, limit_sessions: int = 5):
     """取最近 limit_sessions 个 session（排除当前 session）的记忆，供跨会话上下文注入。
 
@@ -1782,12 +2175,15 @@ class ChatRequestWithSession(ChatRequest):
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequestWithSession):
-    """对话优先入口：支持 session_id 绑定会话 + 跨会话记忆注入。
+async def chat(request: ChatRequestWithSession, http_request: Request):
+    """对话优先入口：支持 session_id 绑定会话 + 跨会话记忆注入 + 用户中途「停止」。
 
     - 无 session_id → 自动新建 session，返回 session_id
     - 有 session_id → 从 DB 读历史消息拼成 history，追加新消息
     - 从最近 N 个 session 的记忆中提取上下文，注入 user 消息（轻量跨会话记忆）
+    - 客户端断开（用户点「停止」/关页面/断网）→ 中止工具循环且**整轮不落库**
+
+    注：body 参数名是 request，故 HTTP 请求对象取名 `http_request`。
     """
     if not (request.message or "").strip():
         raise HTTPException(
@@ -1800,6 +2196,26 @@ async def chat(request: ChatRequestWithSession):
     history = request.history or []
     session_id = request.session_id
 
+    # ---- 用户「停止生成」：靠真实断连探测，而不是另开一个 /cancel 端点 ----
+    # 实测（scripts/probe_abort_persistence.py）：客户端 RST 后服务端原本**照跑完**并把
+    # user/assistant 两条消息都写进库 —— 所以纯前端的「停止」是假按钮（模型照样烧 token，
+    # 库里还留下用户以为已取消的内容）。这里用 is_disconnected() 让服务端知道用户走了。
+    # 单 worker 部署（Dockerfile CMD 无 --workers），故进程内 Event 足够；将来多 worker 必须重做。
+    cancel_evt = threading.Event()
+
+    async def _watch_disconnect():
+        while not cancel_evt.is_set():
+            try:
+                if await http_request.is_disconnected():
+                    cancel_evt.set()
+                    logger.info("检测到客户端断开 → 置取消信号: session=%s", session_id)
+                    return
+            except Exception:  # noqa: BLE001 - 探测失败不该拖垮请求
+                return
+            await asyncio.sleep(0.5)
+
+    watcher = asyncio.create_task(_watch_disconnect())
+
     try:
         agent = _get_chat_agent()
 
@@ -1809,8 +2225,17 @@ async def chat(request: ChatRequestWithSession):
                 s = await session.get(ChatSession, session_id)
                 if not s:
                     raise HTTPException(status_code=404, detail="会话不存在")
-                # 多租户：越权访问按 404（防枚举），绝不把他人会话喂给 agent
-                if aid and s.owner_id and s.owner_id != aid:
+                # 多租户：越权访问按 404（防枚举），绝不把他人会话喂给 agent。
+                #
+                # ⚠️ 这里原先是宽松式 `aid and s.owner_id and s.owner_id != aid`，
+                # `s.owner_id` 为 NULL 时整个条件短路 → **放行**。真机核查发现库里确有
+                # `owner_id IS NULL` 的存量会话（多租户改造时没回填），于是**任何已登录账号
+                # 都能继续它的对话**，把历史读出来喂给模型 = 跨租户内容泄漏。
+                # `_owned_session()`（`GET /chat/sessions/{id}` 走的那条）一直是严格式，
+                # 两处不一致本身就是缺陷。现统一为严格式：**无归属一律 fail closed**。
+                # 存量数据已由 `scripts/backfill_null_session_owner.py` 归位到系统主账号，
+                # 所以严格化不会把原主人关在门外。
+                if aid and s.owner_id != aid:
                     raise HTTPException(status_code=404, detail="会话不存在或无权访问")
                 msgs = await session.execute(
                     select(ChatMessage)
@@ -1856,6 +2281,7 @@ async def chat(request: ChatRequestWithSession):
                     history=history,
                     user_msg=user_msg_for_agent,
                     model=request.model,
+                    cancel=cancel_evt,
                 ),
                 timeout=300,
             )
@@ -1876,6 +2302,20 @@ async def chat(request: ChatRequestWithSession):
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
+        # 「本账号没配模型 API」是配置缺失，不是服务故障 —— 单独给 400 + 可执行指引，
+        # 让前端把话说清楚，而不是混进 500 里（DESIGN_subaccount_model_isolation.md §3-D3）。
+        try:
+            from chat_agent import ModelNotConfiguredError as _ModelNotConfigured
+        except Exception:  # noqa: BLE001 - chat_agent 必然已加载；此处仅防御性兜底
+            _ModelNotConfigured = None  # type: ignore[assignment]
+        if _ModelNotConfigured is not None and isinstance(e, _ModelNotConfigured):
+            logger.warning("ChatAgent 拦截：当前账号未配置模型 API（session=%s）", session_id)
+            # detail 用**字符串**而非对象：前端 ApiError 取 body.detail 作 message，
+            # 传对象会被 String() 成 "[object Object]" 把指引吃掉。
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            ) from e
         logger.exception("ChatAgent 异常: session=%s", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1885,6 +2325,22 @@ async def chat(request: ChatRequestWithSession):
                 "traceback": traceback.format_exc()[-3000:],
             },
         )
+    finally:
+        # 无论成功、超时还是异常，都必须停掉断连探针协程（否则每个请求漏一个常驻协程）。
+        watcher.cancel()
+
+    # ---- 用户点了「停止」：整轮零落盘 ----
+    # 不建任务、不写 chat_messages、不写会话记忆。理由：若只停 UI 而把 user/assistant
+    # 写进库，用户以为取消掉的那轮会在重载会话时「复活」，且他打错字的那条会永久留在
+    # history 里污染后续对话（这正是 boss 反馈「改了也没改」的根因）。
+    if result.get("cancelled"):
+        logger.info("对话轮次被用户中止 → 整轮不落库: session=%s", session_id)
+        return ChatResponse(
+            reply="",
+            intent=result.get("intent", "chat"),
+            session_id=session_id,
+            cancelled=True,
+        )
 
     reply = result.get("reply", "")
     intent = result.get("intent", "chat")
@@ -1892,6 +2348,8 @@ async def chat(request: ChatRequestWithSession):
     task_status: Optional[str] = None
     tool_calls: List[str] = result.get("tool_calls", []) or []
     sources: List[dict] = result.get("sources", []) or []
+    source_warnings: List[str] = result.get("source_warnings", []) or []
+    sources_are_real: bool = bool(result.get("sources_are_real", True))
 
     # 触发研报技能：复用 create_task（异步创建任务，引擎子进程在后台跑）
     if intent == "generate_report" and "report" in result:
@@ -1923,6 +2381,10 @@ async def chat(request: ChatRequestWithSession):
     # DB 持久化是「增强」而非对话正确性的前提：DB 不可达 / 表缺失 / 连接超时
     # 一律降级（记日志、不阻断），保证即使记忆层挂了，对话回复仍正常 200 返回，
     # 避免「答案已算对却被 500」的伪失败（2026-09 实测根因）。
+    # 落库消息 id 回传前端：前端「编辑历史消息」要拿它精确定位截断起点。
+    # 持久化降级时保持 None —— 前端据此走「本地删除即可」（该条从未进库，无需服务端截断）。
+    user_msg_id: Optional[str] = None
+    asst_msg_id: Optional[str] = None
     try:
         if not session_id:
             # 自动新建 session（首条用户消息前 80 字作主题）
@@ -1939,15 +2401,17 @@ async def chat(request: ChatRequestWithSession):
                 await session.commit()
                 session_id = new_session.id
         # 持久化 user + assistant 消息（原始内容，不受记忆注入影响）
+        user_msg_id = str(uuid.uuid4())
+        asst_msg_id = str(uuid.uuid4())
         async with get_async_session() as session:
             session.add(ChatMessage(
-                id=str(uuid.uuid4()),
+                id=user_msg_id,
                 session_id=session_id,
                 role="user",
                 content=request.message,
             ))
             session.add(ChatMessage(
-                id=str(uuid.uuid4()),
+                id=asst_msg_id,
                 session_id=session_id,
                 role="assistant",
                 content=reply,
@@ -1956,6 +2420,8 @@ async def chat(request: ChatRequestWithSession):
             ))
             await session.commit()
     except Exception as e:  # noqa: BLE001
+        # 落库失败 → 上面的两个 id 作废（行没进库，前端拿它们去截断会 404）
+        user_msg_id = asst_msg_id = None
         logger.warning("ChatAgent 会话持久化失败（降级：仍返回对话回复）: %s", e)
 
     # 跨会话记忆：每 session 仅存一份 conclusion（upsert），避免无限膨胀
@@ -1972,6 +2438,10 @@ async def chat(request: ChatRequestWithSession):
         session_id=session_id,
         tool_calls=tool_calls,
         sources=sources,
+        source_warnings=source_warnings,
+        sources_are_real=sources_are_real,
+        user_message_id=user_msg_id,
+        assistant_message_id=asst_msg_id,
     )
 
 

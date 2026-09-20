@@ -41,6 +41,18 @@ python-jose[cryptography]>=3.3
 # `AttributeError: module 'bcrypt' has no attribute '__about__'`，见设计文档 §6 技术纠偏）
 bcrypt>=4.0
 
+# ============ 输出渲染（DESIGN_OUTPUT_RENDERING.md v1.0） ============
+# 三者均为纯 Python（无系统库依赖），容器 python:3.13-slim 无需 apt 即可构建。
+# 落选方案备忘：weasyprint 需 libpango/cairo 系统库（slim 镜像无，须改镜像 apt），
+# headless Chrome / wkhtmltopdf 镜像内不存在 —— 均已排除。
+# docx 输出（tools/doc_render.py::render_docx）
+python-docx>=1.1
+# pptx 输出（render_pptx；会带 Pillow/XlsxWriter 两个纯 Python 间接依赖）
+python-pptx>=1.0
+# pdf 输出（render_pdf）。中文靠 reportlab 内置 UnicodeCIDFont('STSong-Light')，
+# 不需任何系统字体文件；默认 Helvetica 不含 CJK，不注册该字体则正文全黑块。
+reportlab>=4.0
+
 # ============ M11-3 MCP 消费桥 ============
 # MCP 客户端 SDK（SSE / Streamable HTTP transport）。stdio 跨容器坑多，M11-3 暂不内置。
 # 固定 1.x：tools/mcp_client.py 依赖 1.x 的 mcp.client.sse.sse_client /

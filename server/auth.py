@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from server.database import get_async_session
-from server.models import Account
+from server.models import Account, CallRecord
 from server import tenancy
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -178,6 +178,20 @@ class ResetPasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class CallRecordOut(BaseModel):
+    """调用流水（操作记录）对外视图。含操作内容预览，不含密钥等敏感字段。"""
+    id: str
+    account_id: str
+    kind: str
+    target: Optional[str] = None
+    ok: bool
+    latency_ms: Optional[int] = None
+    cost_hint: Optional[float] = None
+    detail: Optional[str] = None
+    content: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
 def _out(acc: Account) -> AccountOut:
     return AccountOut(
         id=acc.id,
@@ -205,12 +219,31 @@ async def register(body: RegisterIn):
         total = (await session.execute(select(func.count()).select_from(Account))).scalar() or 0
         first = total == 0
 
+        # 子账号必须归属主账号（DESIGN_account_hierarchy：开放注册→pending→主账号 approve）。
+        # 系统有且仅有唯一系统主账号（首个注册者，is_system_main）；非首个账号统一挂到它之下，
+        # 否则 parent_id 恒为 None → list_sub_accounts 用 parent_id==main.id 过滤时永远查不到，
+        # 子账号既不在审批列表、approve/reject 也会 404（被彻底孤立）。
+        parent_id: Optional[str] = None
+        if not first:
+            sys_main = (
+                await session.execute(
+                    select(Account).where(Account.is_system_main.is_(True)).limit(1)
+                )
+            ).scalars().first()
+            if sys_main is None:  # 兜底：取首个主账号
+                sys_main = (
+                    await session.execute(
+                        select(Account).where(Account.role == "main").limit(1)
+                    )
+                ).scalars().first()
+            parent_id = sys_main.id if sys_main else None
+
         acc = Account(
             id=str(uuid.uuid4()),
             username=body.username,
             password_hash=hash_password(body.password),
             role="main" if first else "sub",
-            parent_id=None,
+            parent_id=parent_id,
             status="active" if first else "pending",
             is_system_main=bool(first),
             created_at=datetime.utcnow(),
@@ -371,3 +404,51 @@ async def delete_account(child_id: str, main: Account = Depends(require_main)):
         await session.commit()
     archived = tenancy.archive_account_layout(child_id)
     return {"ok": True, "archived": str(archived) if archived else None}
+
+
+@router.get("/accounts/{child_id}/call-records", response_model=list[CallRecordOut])
+async def list_child_call_records(
+    child_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    main: Account = Depends(require_main),
+):
+    """Phase 2 · 主账号查阅子账号的调用流水（操作记录）。
+
+    越权 + 存在性：子账号必须归属本主账号，否则一律 404（避免枚举探测）。
+    返回按调用时间倒序的最近记录，支持 limit/offset 分页（limit 钳制 1~200）。
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    async with get_async_session() as session:
+        child = (
+            await session.execute(
+                select(Account).where(Account.id == child_id, Account.parent_id == main.id)
+            )
+        ).scalars().first()
+        if child is None:
+            raise HTTPException(status_code=404, detail="子账号不存在")
+        rows = (
+            await session.execute(
+                select(CallRecord)
+                .where(CallRecord.account_id == child_id)
+                .order_by(CallRecord.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars().all()
+    return [
+        CallRecordOut(
+            id=r.id,
+            account_id=r.account_id,
+            kind=r.kind,
+            target=r.target,
+            ok=r.ok,
+            latency_ms=r.latency_ms,
+            cost_hint=r.cost_hint,
+            detail=r.detail,
+            content=r.content,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]

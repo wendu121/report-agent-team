@@ -26,7 +26,12 @@ class ToolBundle:
     data_proc: object                  # DataProcTool
     doc_export: object                 # DocExportTool
     mcp: object = None                 # M11-3：MCPClient（外部工具桥；无配置为 None）
-    using_mock_search: bool = False    # True 表示检索为占位数据（审计/告警用）
+    # True 表示本次**显式**装载了 provider=mock 的源（离线/链路验证），产出为占位数据。
+    # 注意：不再表示「没有真源」——那个含义已由 degraded 精确表达。
+    using_mock_search: bool = False
+    # 本次未能装载的源：[{id, name, reason, fix}]（reason: missing_key / provider_init_failed）。
+    # 调用方必须据此如实告知「哪些源没参与检索」，绝不假装检索面完整（立约·禁假配置）。
+    degraded: list = None
 
 
 def build_tools(config_path: Optional[str] = None,
@@ -40,8 +45,10 @@ def build_tools(config_path: Optional[str] = None,
     plugin_filter：本次任务选定的数据源 id 列表（来自 ChatEntry「插件」多选）。
     None = 全部 enabled 源；非空 = 仅聚合列表内源（coming_soon/未知 id 已被 API 层拒绝）。
 
-    密钥：api_key 源从 DS_<ID大写>_API_KEY 读（tavily 兼容旧 TAVILY_API_KEY），
-    缺失则降级 MockProvider 占位（带 source 标记，不冒充真实检索）。
+    密钥：api_key 源从 DS_<ID大写>_API_KEY 读（tavily 兼容旧 TAVILY_API_KEY）。
+    **缺密钥的源一律不注册**，登记到 SearchTool.degraded（含 reason/fix），其结果不会
+    出现；装载时逐源告警并写进 ToolBundle.degraded。仅「显式配置为 mock 的源」才会
+    装载，其结果带 is_mock 标记且不进「来源」列表。
     """
     import os
     from pathlib import Path
@@ -67,13 +74,26 @@ def build_tools(config_path: Optional[str] = None,
     secrets = load_secrets()
     web = build_search_tool(specs, secrets, max_results=max_results, timeout=timeout)
 
+    if web.degraded:
+        # 逐源如实报出：不要说「检索不可用」，要说清**哪个**源、**为什么**、**怎么修**。
+        # 2026-09-19：此前这里判断的是全局 `using_mock_search`，只要还有任一 keyless 真源
+        # 就永远是 False → 分支从未触发，缺密钥的源静默产出占位数据冒充检索结果。
+        print(
+            "\n" + "=" * 70
+            + f"\n[WARN] 有 {len(web.degraded)} 个数据源本次**未参与检索**（不会贡献任何数据）："
+        )
+        for d in web.degraded:
+            why = "未配置密钥" if d.get("reason") == "missing_key" else str(d.get("reason"))
+            print(f"       - {d.get('id')}（{d.get('name')}）原因={why}"
+                  f" → 修复：{d.get('fix')}")
+        print("       若报告内容需要这些来源，请先在 UI 修复后再重跑。" + "\n" + "=" * 70 + "\n")
+
     if web.using_mock_search:
         print(
             "\n" + "=" * 70
-            + "\n[WARN] 未检测到任何真实数据源密钥（DS_*_API_KEY / TAVILY_API_KEY），"
-            "检索已降级为 MockProvider 占位。\n"
-            "       当前产出为占位数据，仅用于链路验证，**不可作为真实研报依据**。\n"
-            "       配置真实检索：在 .secrets/plugins.env 写入 DS_TAVILY_API_KEY=xxx。\n"
+            + "\n[WARN] 本次装载了**显式声明**的 mock（占位）数据源，产出为占位数据，"
+            "仅用于链路验证，**不可作为真实研报依据**。\n"
+            "       如需真实检索：在「设置 → 数据源」为对应插件填入密钥。\n"
             + "=" * 70 + "\n"
         )
 
@@ -99,4 +119,5 @@ def build_tools(config_path: Optional[str] = None,
         ),
         mcp=mcp,
         using_mock_search=web.using_mock_search,
+        degraded=list(getattr(web, "degraded", []) or []),
     )

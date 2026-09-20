@@ -15,6 +15,65 @@
     <!-- 概览：先看清技能库「有多少、开了多少、覆盖哪些 Agent」 -->
     <StatStrip :stats="stats" />
 
+    <!-- 待审批提案 -->
+    <el-card shadow="never" class="blk">
+      <template #header>
+        <div class="blk-head">
+          <span class="blk-title">待审批提案（{{ proposals.length }}）</span>
+          <el-button size="small" text :icon="Refresh" @click="loadProposals">刷新提案</el-button>
+        </div>
+      </template>
+      <el-table :data="proposals" size="default" row-key="id">
+        <el-table-column label="名称 / ID" min-width="160">
+          <template #default="{ row }">
+            <div class="sc-name">{{ row.name }}</div>
+            <div class="sc-sub">{{ row.id }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="级别" width="96">
+          <template #default="{ row }">
+            <el-tag size="small">{{ row.level || '—' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="作用 Agent" min-width="150">
+          <template #default="{ row }">
+            <template v-if="row.target_roles && row.target_roles.length">
+              <span v-for="r in row.target_roles" :key="r" class="sc-tag">{{ roleLabel(r) }}</span>
+            </template>
+            <span v-else class="sc-sub">全部 Agent</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="源 URL" min-width="180">
+          <template #default="{ row }">
+            <a v-if="row.provenance?.source_url" class="sc-link" :href="row.provenance.source_url" target="_blank" rel="noopener">
+              {{ row.provenance.source_url }}
+            </a>
+            <span v-else class="sc-sub">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150">
+          <template #default="{ row }">
+            <el-button
+              type="success"
+              link
+              size="small"
+              :loading="row._accepting"
+              @click="onAcceptProposal(row)"
+            >通过</el-button>
+            <el-button
+              type="danger"
+              link
+              size="small"
+              :loading="row._rejecting"
+              @click="onRejectProposal(row)"
+            >驳回</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-if="proposalsLoading" class="sc-empty">加载中…</div>
+      <div v-else-if="proposals.length === 0" class="sc-empty">暂无待审批提案。</div>
+    </el-card>
+
     <el-tabs v-model="tab" class="market-tabs">
       <el-tab-pane label="市场" name="market" />
       <el-tab-pane label="已安装" name="installed" />
@@ -149,11 +208,19 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { Refresh } from '@element-plus/icons-vue';
+import { authFetch } from '@/api/client';
 import type { SkillItem } from '@/types';
 import EntityCard from '@/components/EntityCard.vue';
 import PageHead from '@/components/PageHead.vue';
 import StatStrip from '@/components/StatStrip.vue';
 import { skillIcon, agentIcon } from '@/utils/emoji';
+import {
+  listSkillProposals,
+  acceptSkillProposal,
+  rejectSkillProposal,
+  type SkillProposalItem,
+} from '@/services/skillService';
 
 const API = '/api/v1';
 const items = ref<SkillItem[]>([]);
@@ -163,6 +230,11 @@ const tab = ref('market');
 const keyword = ref('');
 const catFilter = ref('');
 const dialog = ref(false);
+
+// 待审批提案：在后端类型上附加本地 UI 标志位
+type SkillProposalRow = SkillProposalItem & { _accepting?: boolean; _rejecting?: boolean };
+const proposals = ref<SkillProposalRow[]>([]);
+const proposalsLoading = ref(false);
 
 const form = reactive({
   id: '',
@@ -248,7 +320,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/skills`);
+    const res = await authFetch(`${API}/skills`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as SkillItem[];
@@ -256,6 +328,53 @@ async function load(): Promise<void> {
     error.value = e instanceof Error ? e.message : '加载失败';
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadProposals(): Promise<void> {
+  proposalsLoading.value = true;
+  try {
+    proposals.value = await listSkillProposals();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '加载提案失败');
+  } finally {
+    proposalsLoading.value = false;
+  }
+}
+
+async function onAcceptProposal(row: SkillProposalRow): Promise<void> {
+  row._accepting = true;
+  try {
+    await acceptSkillProposal(row.id);
+    ElMessage.success('已采纳，已裁剪为精简索引版');
+    await loadProposals();
+    await load();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '审批失败');
+  } finally {
+    row._accepting = false;
+  }
+}
+
+async function onRejectProposal(row: SkillProposalRow): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定驳回提案「${row.name}（${row.id}）」？该操作不可撤销。`,
+      '驳回提案',
+      { type: 'warning', confirmButtonText: '驳回', cancelButtonText: '取消' },
+    );
+  } catch {
+    return; // 用户取消
+  }
+  row._rejecting = true;
+  try {
+    await rejectSkillProposal(row.id);
+    ElMessage.success('已驳回');
+    await loadProposals();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '驳回失败');
+  } finally {
+    row._rejecting = false;
   }
 }
 
@@ -278,7 +397,7 @@ async function onDisable(p: SkillItem): Promise<void> {
 }
 async function putSkill(id: string, body: Record<string, unknown>): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/skills/${id}`, {
+    const res = await authFetch(`${API}/admin/skills/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -297,7 +416,7 @@ async function putSkill(id: string, body: Record<string, unknown>): Promise<void
 
 async function onCreate(): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/skills`, {
+    const res = await authFetch(`${API}/admin/skills`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...form }),
@@ -321,7 +440,7 @@ async function onDelete(p: SkillItem): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/admin/skills/${p.id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/admin/skills/${p.id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();
@@ -332,7 +451,10 @@ async function onDelete(p: SkillItem): Promise<void> {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  loadProposals();
+});
 </script>
 
 <style scoped>
@@ -382,4 +504,31 @@ onMounted(load);
   background: var(--brand-soft);
   border-radius: 999px;
 }
+.blk {
+  margin-bottom: 24px;
+}
+.blk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.blk-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+.sc-sub { font-size: 11px; color: var(--ink-400); line-height: 1.5; word-break: break-all; }
+.sc-name { font-size: 13px; color: var(--ink-900); font-weight: 500; }
+.sc-tag {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  border-radius: 999px;
+}
+.sc-link { color: var(--brand); font-size: 12px; text-decoration: none; word-break: break-all; }
+.sc-link:hover { text-decoration: underline; }
+.sc-empty { padding: 24px 0; text-align: center; color: var(--ink-400); font-size: 13px; }
 </style>

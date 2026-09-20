@@ -81,6 +81,14 @@ class EngineProcess:
         if self.account_id:
             input_data["account_id"] = self.account_id
 
+        # 状态目录必须存在再写：多租户改造后 state_dir 会被改写成
+        # {TENANTS_ROOT}/<account_id>/.engine_state（见 __init__ 与 launch_engine），
+        # 而该目录此前没有任何地方创建（RESOURCE_DIRS 也没有它）→ 写文件直接
+        # FileNotFoundError，任务「创建成功」却在 5ms 内 escalated，用户永远拿不到报告。
+        # 这里是最靠近写入点的一层兜底，对「老账号目录已存在但缺 .engine_state」也生效。
+        # 依据：VERIFICATION_ENGINE_STATE_DIR.md（2026-09-19 实机事故复盘）
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
         with open(self.input_file, "w", encoding="utf-8") as f:
             json.dump(input_data, f, ensure_ascii=False, indent=2)
 

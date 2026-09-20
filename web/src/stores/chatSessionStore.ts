@@ -6,6 +6,7 @@ import {
   createSession,
   deleteSession,
   renameSession,
+  clearSessions,
   type ChatSessionItem,
 } from '@/services/chatSessionService';
 
@@ -43,11 +44,18 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     sessions.value = sessions.value.filter((x) => x.id !== id);
   }
 
+  /** 清空全部会话：调 bulk 端点，本地置空列表。返回删除数量供 UI 提示。 */
+  async function clearAll(): Promise<{ ok: boolean; deleted: number }> {
+    const res = await clearSessions();
+    sessions.value = [];
+    return res;
+  }
+
   async function rename(id: string, topic: string): Promise<void> {
     const s = await renameSession(id, topic);
     const idx = sessions.value.findIndex((x) => x.id === id);
     if (idx >= 0) sessions.value[idx] = s;
   }
 
-  return { sessions, loading, loaded, refresh, create, remove, rename };
+  return { sessions, loading, loaded, refresh, create, remove, rename, clearAll };
 });

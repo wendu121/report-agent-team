@@ -22,13 +22,15 @@ def exp_paths(tmp_path, monkeypatch):
     cfg = tmp_path / "config"
     cfg.mkdir()
     audit = tmp_path / ".audit"
-    monkeypatch.setattr(ex, "BASE", tmp_path)
-    monkeypatch.setattr(ex, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(ex, "EXPERT_DIR", tmp_path / "experts")
-    monkeypatch.setattr(ex, "REGISTRY_PATH", cfg / "experts.yaml")
-    monkeypatch.setattr(ex, "AUDIT_DIR", audit)
-    monkeypatch.setattr(ex, "EXPERT_LOG", audit / "experts.jsonl")
-    monkeypatch.setattr(ex, "PROPOSAL_DIR", audit / "expert_proposals")
+    # 同 test_m12_skill_importer：多租户改造后真实解析走惰性函数
+    # （_root/_registry_path/_expert_dir/...），旧常量虽在但已无人消费——
+    # 打常量会「改了个寂寞」（注册写进租户根，测试却读 tmp_path 下的包）。
+    monkeypatch.setattr(ex, "_root", lambda: tmp_path)
+    monkeypatch.setattr(ex, "_registry_path", lambda: cfg / "experts.yaml")
+    monkeypatch.setattr(ex, "_expert_dir", lambda: tmp_path / "experts")
+    monkeypatch.setattr(ex, "_audit_dir", lambda: audit)
+    monkeypatch.setattr(ex, "_expert_log", lambda: audit / "experts.jsonl")
+    monkeypatch.setattr(ex, "_proposal_dir", lambda: audit / "expert_proposals")
     return tmp_path
 
 
@@ -111,7 +113,7 @@ def test_malformed_id_proposal_path_traversal_blocked(exp_paths):
     # M1/M2 回归：专家提案 id 含 ../ 必须被规范化，不逃出 PROPOSAL_DIR
     for evil in ("../../evil", "../evil", "a/../../b", "..\\..\\evil"):
         p = ex._expert_proposal_path(evil)
-        assert p.resolve().is_relative_to(ex.PROPOSAL_DIR.resolve()), \
+        assert p.resolve().is_relative_to(ex._proposal_dir().resolve()), \
             f"{evil} 逃出提案目录: {p}"
     # 真实越界读验证：在 BASE 根放陷阱文件，get_expert_proposal('../../escaped') 不应读到
     trap = exp_paths / "escaped.json"

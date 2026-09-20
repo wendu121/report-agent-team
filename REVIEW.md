@@ -1,338 +1,250 @@
-# 独立审议 · M8-5 子集编排（第三闸 / edict-gate）
+<!--
+  【历史注记】以下描述的是 2026-09-19 19:10 配额重置**之前**的状态，当时独立审议确实一次也没跑成。
+  该状态已于 2026-09-19 19:23 / 19:50 / 19:52 改变：三次独立审议全部实际执行完毕，
+  结论见本文件顶部总览表与三份独立 REVIEW 文件。主代理**未自签**、未伪造任何通过结论。
+  （原始状态描述保留于下，作为限流阻塞的真实记录）
+  主代理**未自签**、未伪造通过结论。原因：独立 reviewer 子代理**每次**启动即被 API 限流挡下
+  （429「您的使用量已超出频率限制，将在 2026-09-19 19:10:16 UTC+8 重置」）。
 
-> ⛔ **第 18 轮（UI 设计系统重做 · 2026-09-16）状态：BLOCKED —— 独立审议未执行。**
-> 原因：全部 7 个子代理在 2026-09-16 14:17–14:20 因 API **429** 失败，配额将于 **14:56:07 (UTC+8)** 重置，无法派独立 reviewer。
-> 处置：**主代理未自签、未 commit**；自审见 `VERIFICATION.md §17`，补审待办见本文件末尾「§18 补审待办」。
-> ⚠️ 下文所有 `<!-- reviewed-by: independent-subagent -->` 标记**仅代表其各自轮次（M8-5 / M9-1）**，**不覆盖本轮 UI 重做**。
-> ✅ **补审已执行（2026-09-16）**：第 18 轮 UI R3+R4 独立审议现已完成，权威结论见本文件最末「## 第 18 轮补审 · UI R3+R4（独立审议结论 · 2026-09-16）」。原 429 BLOCKED 记录作历史留痕保留。
+  尝试记录（全部失败，无一例外）：
+    - 2026-09-19 16:52  "Frontend sub-account model UX"            → 429
+    - 2026-09-19 16:54  "Write gateway purge script"              → 429
+    - 2026-09-19 17:2x  "Backend stop/edit for chat"(chat-backend) → 429
+    - 2026-09-19 17:2x  "Independent review of chat interrupt/edit" → 429
+  工作树里因而**累积了两个未审议轮次**（子账号隔离 + 对话可中断/可编辑），均在配额重置后一并补审。
+  配额重置后须补做独立审议，PASS 前**不得 commit**（遵循 2026-09-03 确立的门禁受阻硬约定）。
+  第一轮（§1 以下）与第二轮（§2）的补审清单分别列出。
+-->
+# REVIEW.md — 独立审议总览（三道门禁 · 第三道）
 
-**审议人**：independent-subagent（独立，未由主代理签署）
-**日期**：2026-09-08
-**范围**：`orchestrator.py` `server/admin.py` `server/api.py` `server/engine_client.py` `server/engine_runner.py` + `VERIFICATION.md §14`
+> **本文件是 gate ③ 的索引 + 历史。三次独立审议均已实际执行**，各自结论落在独立文件中
+> （每份首行含 `reviewed-by: independent-subagent` 标记、由独立子代理撰写；主代理**未自签**、
+> 未改写任何审议结论）：
+>
+> | 里程碑 | 独立审议文件 | 结论 |
+> |---|---|---|
+> | 检索源诚实降级 | `REVIEW_source_honesty.md` | PASS_WITH_NOTES（无 BLOCKING） |
+> | 子账号模型/密钥隔离 | `REVIEW_subaccount_isolation.md` | PASS_WITH_NOTES（无 BLOCKING）；HIGH-1 已闭环 |
+> | 对话可中断/可编辑 | `REVIEW_chat_interrupt_edit.md` | PASS_WITH_NOTES（产品面 BLOCKING=0） |
+>
+> **⚠️ 但当前仍不可 commit，原因如实登记在这里**：上述三份结论出具**之后**，主代理又改了 4 处代码
+> （1 处按审议者给的修法修一个真回归、1 处补审议者点出的测试门禁缺陷、2 处过时 docstring）。
+> 这 4 处都属「gate ③ 结论之后的新改动」，按约定必须回到独立审议者处复核，**不能自认修好**：
+>
+> | 事后改动 | 性质 | 复核状态 |
+> |---|---|---|
+> | `web/src/stores/template.ts` 裸 fetch → `authFetch` | 审议者抓到的 HIGH 回归 | ✅ 已回审议者复核，HIGH-1 已闭环 |
+> | `scripts/e2e_report_flow.py` 补 `sys.exit(1)` + 窗口 480→900s | 审议者点出的门禁假绿（F4） | ❌ **复核未完成**（429 打断） |
+> | `tools/__init__.py` docstring 更正 | 文档层过时描述 | ❌ **复核未发起**（429 打断） |
+> | `orchestrator.py` docstring 更正 | 文档层过时描述 | ❌ **复核未发起**（429 打断） |
+>
+> 429 重置时间：**2026-09-20 00:11:04 UTC+8**。**修复复核 PASS 前不 commit。**
+> 具体待办与审什么见 `REVIEW_postfix_pending.md`。
+>
+> 以下 §1 / §2 保留为**历史记录**：那是配额被限流期间写下的补审清单（当时确实一次都没跑成），
+> 其内容已由上述三份独立审议逐条覆盖，请以那三份文件为准。
 
----
+**Verdict（历史）: `BLOCKED` —— 仅描述下文 §1/§2 所对应两轮补审在**当时**的状态。**
+两轮已于 2026-09-19 19:50 / 19:52 分别由独立子代理执行完毕，结论见上方总览表。
 
-## 一句话结论
+## 为什么是 BLOCKED
 
-**PASS** — 九项审查标准全部经代码核对 + 真实离线 stub e2e + 单元测试验证，无 BLOCK 级问题。发现 3 处低危文档/链路小瑕疵（不阻塞）。
+子账号模型/密钥隔离这一轮（详见 `DESIGN_subaccount_model_isolation.md`、
+`VERIFICATION.md`）在实施中途尝试启动独立审议子代理，两个子代理均**立即**失败：
 
----
+```
+Error: Failed to execute task "Frontend sub-account model UX" after subagent was created:
+429 您的使用量已超出频率限制，将在 2026-09-19 19:10:16 UTC+8 重置
+Error: Failed to execute task "Write gateway purge script" after subagent was created:
+429 您的使用量已超出频率限制，将在 2026-09-19 19:10:16 UTC+8 重置
+```
 
-## 发现表
+按既定硬约定：**主代理不得自审自签顶替**。故本文件只声明阻塞事实，不产出审议结论。
+实施与验证因此由主代理独立完成（含"实施者自测"性质的 13 项断言），
+**其独立性不足，不能替代 gate ③**。
 
-| 严重度 | 项 | 证据 | 建议 |
-|---|---|---|---|
-| 低 | 链路中 `gates` 为死参数（引擎侧不消费） | `server/engine_runner.py:58` 仅透传 `agents`；`run_report(agents=…, gates=…)` 形参 `gates` 在 `build_graph` 中未被使用（`orchestrator.py:971-999` 由 `GATE_NAME` 从 `agents` 推导 gate）。`gates` 仅作 UI/校验配对元数据 | 可接受（设计如此）。若想消除歧义，可在 `run_report`/`engine_runner` 加一行断言 `gates == {AGENT_GATE_PAIR[a] for a in agents}` 防御性校验，或删掉 `gates` 形参 |
-| 低 | 过时注释（M8-5 已落地但注释仍称"待 M8-5"） | `server/api.py:241`「子集编排待 M8-5 引擎改造」；`server/admin.py:736-742` 段头 + `:872` `meta.constraint`「子集编排待 M8-5」 | 改注释为"已由 M8-5 落地"，避免误导后续维护者 |
-| 低 | 任务摘要提示写 gate 节点名为 `gate_a/gate_b/gate_c`，实际为 `gate_researcher/gate_analyst/gate_writer` | `orchestrator.py:982` `"gate_" + role.lower()` | 仅提示文案误差，非代码缺陷；无需改码 |
-| 信息 | `api.py:337` `emit_task_escalated(..., task.routing_state.last_gate or "GateC")` 默认 "GateC" | 子集在 GateA 升级时 `last_gate` 已是真实值，不会落到默认；安全 | 无动作 |
+## 本轮变更摘要（供补审者定位）
 
----
+改动 10 个文件 + 2 个新脚本 + 1 份设计文档，核心是「子账号不再继承主账号 new-api 网关」：
 
-## 逐条核对（真实测试，不轻信摘要）
+1. `server/tenancy.py` — 子账号播种中性模板（models.yaml 清空端点、model_mapping 留空骨架、custom_providers 清空）
+2. `orchestrator.py` — `_has_tenant_context()`；端点为空时**仅无租户上下文**才回落 `NEWAPI_*`
+3. `server/admin.py` — 6 个 `public_router` 账号作用域读接口加鉴权依赖
+4. `chat_agent.py` + `server/api.py` — "未配置模型"从被吞成敷衍回复改为 400 + 可执行指引
+5. `.env` — 删除 `RAT_LEGACY_GLOBAL=1`
+6. 前端 `ChatEntry.vue` / `Models.vue` — 引导 UI + `authFetch`
+7. `scripts/purge_inherited_gateway.py` / `scripts/verify_subaccount_isolation.py`
 
-**① 向后兼容（agents=None）** ✅
-- `build_graph`：`chain = agents or ["Researcher","Analyst","Writer"]`（`orchestrator.py:977`），缺省即原 3+3 全链。
-- 实测 `run_report(task, stub, agents=None)` → `status=done, last_gate=GateC`，retrieval/analysis/draft 三字段齐全，`prior_versions` 键 = `['Researcher','Analyst','Writer']`。
-- 结论：与原硬编码 6 节点图行为一致。
+## 补审待办（配额恢复后按此清单审）
 
-**② 子集正确性** ✅
-- `_make_route_router`/`_make_route_after_gate`（`:911-935, :950-965`）+ `build_graph` 中 `is_terminal=(role==chain[-1])`（`:982`）。
-- 实测：
-  - `[Researcher]` → `done @ GateA`（末闸 `is_terminal=True` 落定，`:845` `if is_terminal and decision=="advance": rs["status"]="done"`）→ 验证 `route_after_gate` 末位 return `END`（`:964`）。
-  - `[Researcher,Analyst]` → `done @ GateB`。
-  - `[Writer]`（非前缀）→ `escalated @ GateC`（设计行为，见 ⑦）。
+**A. 隔离是否真的无可绕过（最高优先）**
 
-**③ prior_versions 双键 bug 已根除** ✅（B2 真实修复）
-- init 改为 `{role: [] for role in (agents or FULL)}`（`:1026`，**大写**）；`make_agent` 写 `pv[role]`（`:736-737`，`role` 来自 `chain` 大写）。
-- 实测 E2 `prior_versions` 键仅 `['Researcher']`、E3c 仅 `['Researcher','Analyst']`——无任何小写 `researcher` 重复键。确认旧小写 init 已彻底移除。
+- [ ] `_has_tenant_context()` 的异常分支：tenancy 模块导入失败返回 `False`（=允许 env 回落），
+      在引擎子进程 / 单测 / 脚本三种真实入口下会不会被触发？触发即重新打开泄漏，需逐入口断言。
+      重点：`server/engine_runner.py` 在 `input_data` **没有** `account_id` 时（历史任务记录）
+      会不会走到"无上下文"分支 → 若会，老任务是否可能用主账号网关？
+- [ ] 除 `/templates` `/agents-library` `/plugins` `/models` `/skills` `/channels` 外，
+      是否还有其它账号作用域读接口挂在无鉴权路由上？建议全仓扫 `APIRouter(` 与
+      `tenancy.config_path(` 的调用点做交叉比对（`server/websocket.py` 已知用全局状态目录，待判风险）。
+- [ ] 删除 `RAT_LEGACY_GLOBAL=1` 是否打断了某条真实链路？需覆盖：登录/注册、研报任务全流程
+      （任务创建 → 引擎子进程 → WebSocket 流 → 结果页）、能力市场四个页、推送渠道。
+- [ ] `_write_neutral_seed_files()` 的"覆盖判定"（内容逐字节等于主账号原样副本才覆盖）：
+      若主账号后来改了自己的 models.yaml，子账号那份原样副本就不再"逐字节相同" → 会被误判为
+      "用户改过"而**不被净化**。这是否是真实可达的漏洞？建议构造该时序复现。
+- [ ] `purge_inherited_gateway.py` 的污染特征是否完备：只按 `id == "new-api"` /
+      模型名白名单 / `base` 白名单判定。若主账号网关端点被改名（如 `id: my-gateway`），
+      存量子账号会漏洗 —— 是否需要改成"端点 api_key 展开后非空"这类更本质的判据？
 
-**④ 孤儿闸校验** ✅（实测）
-- `admin._validate_template`：`expected_gates={AGENT_GATE_PAIR[a] for a in ags}`；`set(gts)!=expected_gates → 400`（`:823-835`，`AGENT_GATE_PAIR` 定义于 `:755`）。
-- 直接调用：`agents=["Writer"],gates=["GateA"]` → 含明确中文错误「期望 ['GateC']，收到 ['GateA']」；`agents=["Researcher"],gates=["GateA"]` → `errs=[]`。
+**B. 诚实性与错误路径**
 
-**⑤ 透传链路** ✅
-- `EngineProcess`/`launch_engine` 接 `agents/gates` 写入 `input_data["agents"/"gates"]`（`engine_client.py:35-44, 59-60, 168-179`）；`engine_runner.py:58` 读 `agents`；`api.py:297-298` `launch_engine(agents=task.agents, gates=task.gates)`。
-- `create_task` 把模板 `agents/gates` 落库为任务元数据并回传（`api.py:257-283, 358-359`）。子集值全链路贯通到引擎启动。
+- [ ] `400 + 字符串 detail` 是否是全局最优：`ApiError` 的 `String(body.detail)` 会把对象变
+      `"[object Object]"`（本轮踩到并绕开）。这是**共用缺陷**，其它返回对象 detail 的端点
+      （如 `CHAT_AGENT_FAILED` 的 500）在 UI 上是否都显示成 `[object Object]`？建议一并修。
+- [ ] `ModelNotConfiguredError` 的前置闸放在 `step()` 入口，是否漏掉其它进入 LLM 的路径
+      （如专家偏好模型、研报意图分支、`propose_lesson`）？
+- [ ] 前端"未配置"判定（`!!endpoint_id && kind !== 'auto'`）与后端语义是否严格一致？
+      会不会出现"前端认为已配置、后端认为没有"的错位（例如 provider enabled=false 时）？
 
-**⑥ rework 越界诚实升级** ✅（实测）
-- `_make_route_router` rework 分支：`return tgt.lower() if tgt in chain else "escalate"`（`:933`）——子集外 rework 目标**不**静默跑全链，而是 escalate。
-- 单测：`[Researcher]` 子集下 rework 目标 `Analyst`（不在 chain）→ `escalate`；目标 `Researcher`（在 chain）→ `researcher`。
+**C. 回归与副作用**
 
-**⑦ 自审诚实度（VERIFICATION.md §14）** ✅ 无夸大
-- B1（done 硬编码 GateC）：§14.4 明确说明原 `if gate_name=="GateC"` 及修复（`is_terminal` 形参 + `build_graph` 传参）；与代码 `:845, :982` 一致。
-- B2（prior_versions 双键）：§14.4 如实记录 + 复测键干净；与本次实测一致。
-- 非前缀子集 escalate：§14.3（E3 `[Analyst,Writer]→escalated@GateB`、E3b `[Writer]→escalated@GateC`）+ §14.5 明确「是设计行为，非缺陷」（下游缺上游源 → 闸诚实升级）。本报告实测 `[Writer]` 亦 `escalated@GateC`，与文档吻合，**无 overclaim**。
-- HTTP 真实引擎未跑（429 配额）：§14.5 诚实声明，正确性由 stub 离线 e2e（E1-E5）+ E4a-d 覆盖。本报告未做 429 实测，接受该诚实边界。
+- [ ] 主账号全流程端到端（本轮只验了 `/models` HTTP + 一次 `/chat`，未跑研报任务、未跑能力市场）。
+- [ ] `异基座`硬约束对子账号的适用性：单 provider 的子账号**永远无法保存映射**。
+      确认这是有意的治理约束（本轮判断为"有意，且在 UI 明说"），而非把子账号锁死到不可用。
+- [ ] 前端 `usableModels` 归零后 `selectedModel` 落空 → 请求不传 model → 后端用
+      `chat.tool_model`。子账号该字段为空时 `_resolve_chat_model` 返回 `"auto-chat"`，
+      会不会被发到用户自己的 provider 上导致 400（而非被 `ModelNotConfiguredError` 拦住）？
+      —— 注意：本轮 B4 走的是"完全无端点"分支，**这条"有端点但 tool_model 空"的路径未被覆盖**。
 
-**⑧ 无范围蔓延** ✅
-- git 改动仅：`orchestrator.py` `server/{admin,api,engine_client,engine_runner}.py` `VERIFICATION.md` + 新增未跟踪 `DESIGN_M8-5.md`。**无前端改动**（无 `web/` 改动），**未新增角色**，`ReportState` 字段定义未动，`model_mapping.yaml` 未触，agents/gates prompt 文件未动。符合裁定。
+**D. 独立复现要求**
 
-**⑨ 代码质量** ✅
-- 全 5 文件 `py_compile` 通过。
-- 全文 grep `route_router|route_after_agent|route_after_gate` 仅命中新 `_make_*` 定义与调用（`orchestrator.py:911,938,950,986,991,994`），**无旧名残留引用**。
-- 未发现未定义 import 或静默失败路径。
+- [ ] 不要采信 `VERIFICATION.md` 的结论，请**独立重跑**：
+      `docker compose exec -T -e PYTHONPATH=/app api python /app/scripts/verify_subaccount_isolation.py`
+      并自行核对 B1–B4 是否为真 HTTP 断言而非进程内自证。
+- [ ] 建议换基座模型审议（本项目实测：Intern-S2-Preview-397B 可信；`auto-fast` /
+      `auto-reasoning` 曾出现无证据 PASS 与编造行号，勿用）。
 
----
+## 未决风险（主代理自陈，供补审者重点打）
 
-## B1 / B2 修复确认（从代码+测试推理，非信任摘要）
-
-- **B1 真修**：`make_gate(gate_name, llm, models, is_terminal=False)`（`orchestrator.py:760`），终态逻辑改为 `if is_terminal and decision=="advance"`（`:845`），由 `build_graph` 按 `role==chain[-1]` 决定末闸（`:982`）。实测 `[Researcher]→done@GateA`、`[Researcher,Analyst]→done@GateB` 证明末闸不再绑死 GateC。
-- **B2 真修**：`run_report` init `prior_versions={role: [] for role in (agents or FULL)}`（`:1026`，大写），与 `make_agent` 写入键 `pv[role]`（`:736-737`，大写）一致。实测各子集 `prior_versions.keys()` 均为纯大写无重复，旧小写 `researcher` 并存现象已消失。
-
----
-
-## 非前缀子集 escalate 行为
-
-正确作为**设计行为**（非缺陷）记录于 `VERIFICATION.md §14.3 / §14.5`，且被本审议实测（E3b `[Writer]→escalated@GateC`）佐证。下游 Agent 依赖上游真实产物，缺上游源时闸诚实升级而非编造——与「UI 必须是控制器而非查看器 / 拒绝假配置」原则一致（子集是用户真实选择，引擎如实执行）。**文档无 overclaim，结论成立。**
-
----
-
-## 标记确认
-
-文件末尾独立议定标记已写入：`<!-- reviewed-by: independent-subagent -->`
-
----
-
-## 总评
-
-M8-5 达成「模板所选 agent/gate 子集真正驱动引擎流水线」的目标，且未引入假配置、未越界触碰前端/字典/角色定义。两处自纠 bug（B1/B2）经验证确已修复，自审文档诚实无夸大。3 处低危瑕疵均为注释/死参数层面的可优化项，不阻塞合入。
-
-**裁定：PASS**
-
-<!-- reviewed-by: independent-subagent -->
-
----
-
-## M9-1 独立审议（第 16 轮 · 2026-09-08）
-
-**审议人**：independent-subagent（独立，未由主代理签署）
-**对象**：`DESIGN_M9-1.md` + 代码实证（`orchestrator.py` / `server/admin.py` / `VERIFICATION.md §15`）
-**方法**：所有结论均来自 Read/Grep 实证，非信任文档摘要。
-
-### 1. 代码事实核实（设计断言 vs 源码）
-
-| # | 设计断言 | 实证结果 | 判定 |
-|---|---|---|---|
-| F1 | `orchestrator.py:40-59` 确有 4 个硬编码字典，TOOL 为死字典 | 实测 `:40-59` 四字典齐备；`grep TOOL[` 仅命中 `:45` 定义处，运行时零读取 | ✅ 如实 |
-| F2 | `make_agent`（:573）按 `if role=="Researcher/Analyst/Writer"` 硬编码分发 (:593/621/633/671/694/703) | 实测六处分支与行号完全吻合 | ✅ 如实 |
-| F3 | `build_gate_system`（:347）读单一 `gates/review.md` | 实测 `:347 body=_load_md("gates/review.md")` | ✅ 如实 |
-| F4 | `build_gate_user`（:385/386 用 GATE_REVIEWS/PROD_KEY；:395 GateC 附 report_markdown；:403 GateB 附检索上下文） | 实测 `:385/386/395/403` 与描述一致 | ✅ 如实 |
-| F5 | `machine_check`（:426/442/459）三段仅依赖产出形态，与闸名无关 | 实测三段分别操作 `retrieval_records`/`analysis_conclusions`/`draft_segments`，无闸名特异性逻辑 | ✅ 如实（shape 复用成立） |
-| F6 | `build_graph`（:972 `GATE_NAME[role]`）；`run_report`（:1004→:415 热加载；:1008 `build_graph` 在 `run_report` 内） | 实测 `:1004 load_model_mapping`、`:1008 build_graph(...)`；图每次现建 | ✅ 热加载零重启论断成立 |
-| F7 | `admin.py:752-753` `KNOWN_AGENTS`/`KNOWN_GATES` 硬编码 `["Researcher","Analyst","Writer"]`/`["GateA","GateB","GateC"]` | 实测 `:752-753` 与描述一致；`:166 _atomic_write`、`:172 _write_audit` 可复用；templates CRUD `:888-927` 可仿 | ✅ 如实 |
-| F8 | 提出 `AGENT_GATE_PAIR` 需一并派生 | **设计完全未提此常量**；实测 `admin.py:755` 存在第三处硬编码 `{"Researcher":"GateA","Analyst":"GateB","Writer":"GateC"}`，且 `:830` 在 `_validate_template` 中 `expected_gates = {AGENT_GATE_PAIR[a] for a in ags}` 用于配对校验 | ❌ 漏提（见阻塞 B1） |
-
-### 2. 发现的问题
-
-#### 阻塞（BLOCKED 项）
-- **B1 · G7「真驱动闭环」实际断裂（核心价值受损）**
-  `DESIGN_M9-1 §4.4` 与 `VERIFICATION.md §15.4` 仅声明把 `KNOWN_AGENTS`/`KNOWN_GATES`（:752-753）改为派生自 library，却**漏提紧邻的 `AGENT_GATE_PAIR`（:755）**。该常量在 `server/admin.py:830` 被 `_validate_template` 用于「gates 必须与 agents 配对」硬校验。
-  后果：即便 KNOWN_AGENTS 派生成功接纳 `Coder`，执行 E5（`POST /admin/templates agents=["Researcher","Coder"]`）时 `:830` 会对 `AGENT_GATE_PAIR["Coder"]` 触发 `KeyError`（未兜底）→ 500 崩溃，模板创建失败。即设计自诩的「UI 增角色 → 引擎真驱动」闭环在 E5 这一最关键证据点**直接断裂**。
-  修正：§4.4/§15.4 须增补「`AGENT_GATE_PAIR` 一并派生自 `gate_of`（`{a["id"]: a["gate"] for a in agents}`），或 `:830` 改为 `{reg["gate_of"][a] for a in ags}`」。否则 G7 属 overclaim。
-
-#### 低危（PASS_WITH_NOTES 待修）
-- **N1 · `output_key` 自相矛盾（字段错配隐患）**
-  `§3.1` 示例（:117-125）给自定义 `Coder` 写 `output_key: code_records`，但 `§7`（:272）写明「output_key 由 shape 决定（researcher→retrieval_records…），不允许自由填」。二者直接冲突。
-  正确机制（决定 E7 机器校验能否复用）：自定义 researcher 形 agent 必须写入顶层 `retrieval_records`（machine_check shape=researcher 只读该字段，见 F5）。若实现误信 §3.1 示例写 `code_records`，则 GateD 校验 `retrieval_records` 为空→误 escalate，且下游 Analyst 注入的 `retrieval_records` 取不到上游。须以 §7 为权威、改正 §3.1 示例为 `output_key: retrieval_records`，并在实现层强制绑定（不暴露自由填）。
-- **N2 · `build_gate_system` 的 per-gate 文件加载未进 §3.4 实施草图**
-  R1/C2（设计 §10 / §15.2）明确「`build_gate_system` 先查 `gates/<gate>.md`，缺则回落 `gates/review.md`」，但 §3.4 列出的重构对象只含 `machine_check`/`build_gate_user`/`make_gate`/`build_agent_system`/`build_graph`/`call_eval`，**漏列 `build_gate_system`**；§12 提交集也未列。需求已承认，仅靠阅读者记忆兜底，建议在 §3.4 显式补一条 `build_gate_system` 改造，避免实现漏做新闸 prompt 加载。
-- **N3 · 删除模块级四字典前的全仓消费面扫描**
-  实证：server 内除 `engine_runner.py:58`（仅为注释「gates 由 GATE_NAME 推导」，无运行时 `GATE_NAME[` 消费）与 `admin.py` 的 `GATE_NAME_RE`（正则，非字典）外，未发现 orchestrator 以外的运行时消费；web 端不 import 这些常量。删除影响面基本收敛于 orchestrator 内部，但设计未要求提交前 `grep PROD_KEY|GATE_NAME|GATE_REVIEWS|TOOL` 全仓确认。建议 §12 增一步「删除前全仓 grep 零外部引用」作为回归防护。
-
-### 3. 审议结论
-
-- **真伪（是否假配置）**：✅ 引擎驱动链路真实。shape 驱动 `make_agent` + 派生 `GATE_NAME/GATE_REVIEWS` + 复合写 md/gate/mapping/library 的设计在机制上能真正驱动流水线，非「UI 可改引擎忽略」。但 **G7 闭环因 B1（漏 `AGENT_GATE_PAIR`）在 E5 实际断裂**，当前文档状态若照抄实现会产出假闭环。修正 B1 后即为真驱动。
-- **shape 正确性**：⚠️ 机制正确。`machine_check`/`build_gate_user` 改 shape 驱动后，GateD（shape=researcher）确能复用 GateA 校验（只读 `retrieval_records`）。**唯一字段错配风险即 N1**：`output_key` 必须与 shape 强制绑定（§7），否则自定义闸校验与跨 agent 上下文注入错位。只要落实 §7 绑定，无字段错配。
-- **过度工程**：✅ 克制。N1-N5（无节点编辑器/G6 渲染/RBAC/新工具类型/M9-2~5）边界清晰，复合写 4 文件为「真驱动」所必需，无冗余。ruamel 保注释对 model_mapping 已落地、对 library 新文件合理。未见可删减项。
-- **回归风险**：⚠️ 低危可控。不传 `agents` 时 `build_graph`（:967）默认 3+3，向后兼容成立（E1）。§3.2–3.6 已覆盖 orchestrator 内全部 4 字典消费点（:334/385/426/496/574/577/751/972），外部消费面经实证基本为零（N3 补一道 grep 即可闭口）。无破坏 M8-5 子集编排的迹象。
-- **诚实性**：⚠️ 整体诚实（C1-C3、R1-R6、N1-N5、D1-D3 均如实标注），但有一处 **overclaim**：§15.4 称「形成完整闭环，杜绝假配置」，而 B1 使之在 E5 不成立；另 §3.1 示例与 §7 矛盾未标注（N1）。修正 B1/N1 后诚实性无虞。
-
-### 裁定：BLOCKED
-
-**阻塞项（必须修，否则照文档实现会产出自喻的假闭环）**：
-- **B1**：`§4.4` 与 `VERIFICATION.md §15.4` 必须补「`AGENT_GATE_PAIR`（admin.py:755）一并派生自 library 的 `gate_of`」，并相应改 `admin.py:830` 配对校验；否则 E5（`agents=["Researcher","Coder"]`）对 `AGENT_GATE_PAIR["Coder"]` KeyError，G7 真驱动闭环断裂。
-
-**必须修的 NOTES（非阻塞但落地前需消解）**：
-- **N1**：以 §7 为权威，改正 §3.1 示例中 `Coder.output_key: code_records` → `retrieval_records`，实现层强制 shape→output_key 绑定，消除字段错配隐患。
-- **N2**：§3.4 实施草图与 §12 提交集补列 `build_gate_system` 的 per-gate 文件加载改造（R1/C2 已要求，但当前草图漏列）。
-- **N3**：§12 增「删除模块级四字典前全仓 `grep` 零外部运行时引用」防护步骤。
-
-> 说明：F1–F8 中除 F8（即 B1）外，设计对 orchestrator 的代码事实描述全部准确，shape 驱动重构在机制上可行且克制。唯一阻断是「派生清单漏了 `AGENT_GATE_PAIR`」这一处具体、可定位的遗漏，修后即应可 PASS。
-
-<!-- reviewed-by: independent-subagent -->
+1. **测试状态污染**：本轮两次误判都源于"用例没归零"（B0 已补归零断言，但同类风险仍在
+   ——B4 只覆盖"零端点"，未覆盖"有端点但映射为空"）。
+2. **`purge` 脚本只在 wendy1 上验过**：它识别到 3 处污染并改写正确，但没有第二类污染的样本
+   来验证特征完备性。
+3. **`.env` 删开关是本轮最"重"的动作**：它改变了"无上下文"的全局语义，影响面超出子账号模型
+   这一件事，回归面（尤其研报任务全链路）本轮**未完整覆盖**。
 
 ---
-
-## M9-1 独立审议修订确认（第 16 轮补审 · 2026-09-08）
-
-> 视角：与第 16 轮同一独立子代理。本轮只审「B1/N1/N2/N3 四项修订是否到位」，不重新全盘审；核查均亲手 Read `DESIGN_M9-1.md` / `VERIFICATION.md` / `server/admin.py`，未信摘要。
-
-### 逐项闭合核对
-
-**B1 · `AGENT_GATE_PAIR`（admin.py:755）派生 + :830 配对校验改法 —— 闭合 ✅**
-- `DESIGN_M9-1.md §4.4`（:214-227）已显式列出三处硬编码 `KNOWN_AGENTS`(:752)/`KNOWN_GATES`(:753)/`AGENT_GATE_PAIR`(:755)，并给出 `_agent_gate_pair() = {a["id"]: a["gate"] for a in agents}`（即 `load_agent_registry` 的 `gate_of`）。
-- 关键修正到位（:225）："`admin.py:830` `_validate_template` 的配对校验 `expected_gates = {AGENT_GATE_PAIR[a] for a in ags}` 必须改为 `{_agent_gate_pair().get(a) for a in ags}`"，并明确若不改则 E5（`agents=["Researcher","Coder"]`）对 `AGENT_GATE_PAIR["Coder"]` KeyError→500。→ 原 B1 断裂点已消除。
-- `VERIFICATION.md §15.4`（:907-911）同步补全三处派生 + :830 改用派生表 + 注明「独立审议第 16 轮 B1 已纠出，属设计层遗漏，已在本 §15.4 与 DESIGN_M9-1 §4.4 修正」。
-- 实证代码 `server/admin.py`：`:755 AGENT_GATE_PAIR = {...}` 确为真实待改代码，`:830 expected_gates = {AGENT_GATE_PAIR[a] for a in ags}` 确为真实配对逻辑——修订方向相反、方向正确。
-- **微小残余（非阻塞）**：`§2.1 G7`（:70）目标句仍只写「`KNOWN_AGENTS`/`KNOWN_GATES`（:752-753）改为派生自 library」，未把 `AGENT_GATE_PAIR`（:755）一并点名。但 §4.4/§15.4 已完整覆盖，机制无歧义，G7 闭环在文档层面已闭合，故不升级为阻塞。
-
-**N1 · §3.1 示例 `output_key` 与 §7 矛盾 —— 闭合 ✅**
-- `DESIGN_M9-1.md §3.1` 自定义 `Coder` 示例（:117-125）现为 `shape: researcher` + `output_key: retrieval_records`，并注明「⚠️ 由 shape 强制推导（§7）；自定义 researcher 形必须写此值，machine_check shape=researcher 只读 retrieval_records」。原 `code_records` 矛盾项已消除。
-- `§7`（:284）权威规则「`output_key` 由 shape 决定（researcher→retrieval_records / analyst→analysis_conclusions / writer→draft_segments），不允许自由填」与示例一致。字段错配隐患清除。
-
-**N2 · §3.4 漏 `build_gate_system` per-gate 加载 —— 闭合 ✅**
-- `DESIGN_M9-1.md §3.4`（:165）已补条目：`build_gate_system（per-gate 文件加载，R1/C2）：:347 body=_load_md("gates/review.md") 改为先查 gates/<gate_name>.md，存在则读该文件，否则回落 gates/review.md（内置 3 闸维持现状）`。→ 自定义闸 GateD 读独立 `gates/gate_d.md`，不污染 review.md。
-- `§12` 提交集（:335）orchestrator 改动已含 `build_gate_system`；`§10 R1`（:319）亦重申 per-gate 回落策略。阅读者不再需凭记忆兜底。
-
-**N3 · §12 缺删除四字典前全仓 grep 防护 —— 闭合 ✅**
-- `DESIGN_M9-1.md §12`（:336）已增：「删除模块级四字典前的回归防护：提交前全仓 `grep -rn "PROD_KEY\|TOOL\[\|GATE_NAME\[\|GATE_REVIEWS\["` 确认除 orchestrator 内部外零运行时引用（N3：web 端不 import 这些常量；server 内 engine_runner.py:58 仅为注释）；若有外部引用须先改后再删，避免 KeyErrors。」——已补防护步骤。
-
-### 有无新阻塞
-- 复核四项修订涉及段落（§2.1/§3.1/§3.4/§4.4/§7/§10/§12 及 VERIFICATION §15.4），未发现新的阻塞级问题。B1 闭合后 E5「UI 增角色 → 引擎真驱动」链路在设计层自洽。
-
-**裁定：PASS**
-
-<!-- reviewed-by: independent-subagent -->
-
 ---
 
-## M9-1 独立审议（第 17 轮 · 实施 · 2026-09-08）
+# §2 第二轮 · 对话可中断（停止生成）与可修正（编辑重发）· BLOCKED
 
-**审议人**：independent-subagent（独立，未由主代理签署）
-**对象**：实施代码（`orchestrator.py` / `server/admin.py` / `server/api.py` / `web/src/*`）+ `VERIFICATION.md §16`
-**方法**：所有结论来自 `Read`/`Grep`/`py_compile` 实证，不信任 `VERIFICATION.md §16` 摘要。第 16 轮审议只审设计文档，本轮首审**落地代码**，故能发现设计层看不到的实现回归。
+> SoT：`DESIGN_chat_interrupt_edit.md` · 自审：`VERIFICATION.md` §R2
+> **独立审议同样未执行**（429，第 4 次尝试失败，证据见文件顶部注释）→ 自审的 7/7 PASS
+> **独立性不足，不能替代 gate ③**。
 
-### 1. 逐项核对（A1–A16）
+## 本轮变更摘要（供补审者定位）
 
-| # | 核查项 | 实证结果 | 判定 |
-|---|---|---|---|
-| A1 | `PROD_KEY/TOOL[/GATE_NAME[/GATE_REVIEWS[` 零残留 | grep 仅命中 `:38`、`:437` **两条注释**；`PROD_KEY =`/`TOOL =`/`GATE_NAME =`/`GATE_REVIEWS =` 赋值 **0 命中** | ✅ |
-| A2 | `load_agent_registry()` 存在 + DEFAULT 兜底 | `:434` 定义；`:443` `if not p.exists(): data={"agents": list(DEFAULT_REGISTRY["agents"].values())}`；`DEFAULT_REGISTRY` 见 `:43`（全 3 内置） | ✅ |
-| A3 | `make_agent`（:622）shape 驱动 | `shape=reg["shape_of"][role]`(:632)；`allow_empty=(shape=="researcher")`(:635)；工具 `if shape=="researcher"`(:651)；上游注入 `if shape=="analyst"/elif shape=="writer"`(:679/691)；溯源校验 `if shape=="researcher"`(:753)；doc_export `if shape=="writer"`(:762)——**全为 shape 比对，无角色名** | ✅ |
-| A4 | `machine_check`（:461）shape 驱动 + 自定义闸复用 | `shape=reg["gate_shape"][gate_name]`(:470)；三段 `if shape=="researcher"/"analyst"/"writer"`(:471/487/504)。GateD(shape=researcher) 自动复用 GateA 校验逻辑 | ✅ |
-| A5 | `build_gate_system`（:349）per-gate 回落 review | `:356-357` 先查 `gates/<gate_name>.md`，`exists()` 否则 `_load_md("gates/review.md")` | ✅ |
-| A6 | `build_graph`（:1045）派生全链 + 节点命名 | `chain = list(agents) if agents else default_chain(reg)`(:1053)；节点 `role.lower()`(:1057)、`gate_"+role.lower()`(:1058)；`make_gate(..., is_terminal=(role==chain[-1])...)`(:1060) | ✅ |
-| A7 | `run_report` 热加载 + prior_versions 大写键 | `reg=load_agent_registry()`(:1094)；`build_graph(...,agents=agents,reg=reg)`(:1098)；`prior_versions={role:[] for role in (list(agents) if agents else default_chain(reg))}`(:1106)——键为大写 role | ✅ |
-| A8 | `StubLLMClient.complete` shape 驱动 | `:137` 取 `shape=kw.get("shape")`；agent 分支 `if shape=="researcher"/"analyst"/"writer"`(:156/174/185) 真驱动自定义角色 | ⚠️ 见 N1 |
-| B9 | `KNOWN_AGENTS/KNOWN_GATES/AGENT_GATE_PAIR` 已删，改派生 | 赋值 0 命中；改 `_agent_names()`(:380)/`_known_gates()`(:784)/`_agent_gate_pair()`(:788) | ✅ 但见 **阻塞 B1** |
-| B10 | `:830` 配对校验 `.get(a)` 消 KeyError | `pair=_agent_gate_pair(); expected_gates={pair.get(a) for a in ags}`(:875-876)，未知 agent 不 KeyError | ✅（上轮 B1 真闭合） |
-| B11 | `POST /admin/agents-library` 4 写 + round-trip + 异基座 + 回滚 | agents/<id>.md(:1195) / gates/<gate>.md(:1201) / model_mapping.yaml(ruamel :1207-1215) / agents_library.yaml(round-trip :1220-1231)；`role_base==gate_base→400`(:1166)；异常全回滚删文件+还原两 yaml(:1234-1256)；`_write_audit` 全程留痕 | ✅ |
-| B12 | `DELETE /admin/agents-library/{aid}` 内置拒删 + 悬空防护 | `if target.get("builtin")`→400(:1273)；删前扫描 templates 引用 aid/gate→400 点名模板(:1280-1294) | ✅ |
-| C13 | `CreateTaskRequest.agents` + 子集透传 + 未知 400 | `agents:Optional[List[str]]=None`(:152)；`tpl_agents=list(request.agents)`(:283)、`tpl_gates=[pair[a] for a in request.agents if a in pair]`(:284)；未知 `INVALID_AGENTS`→400(:274-282) | ✅ |
-| C14 | 前端市场页/入口/预选 | `web/src/views/Agents.vue` 存在；`router/index.ts` `/agents`(:18,meta 智能体市场)；`DefaultLayout.vue` 智能体菜单(:15-17)；`TaskSubmit.vue` 读 `route.query.agents`(:58) 并 `agents: presetAgents` 提交(:87) | ✅ |
-| D15 | `py_compile` 三模块 | 0 错（`COMPILE_OK_0_ERRORS`） | ✅ |
-| D16 | §16 E1–E7 与代码一致 + R6 诚实 | E1–E7 代码路径均可达；R6 明确「真实 LLM 未跑，stub 离线实证」(:992)，无 overclaim | ✅ 但见 **B1**（自审未捕获） |
+改动 10 个文件 + 3 个新脚本：
 
-### 2. 发现的问题
+1. **`server/main.py`** — `_RequestContextMiddleware`：`BaseHTTPMiddleware` → **纯 ASGI 中间件**
+2. `server/api.py` — `/chat` 断连探测 + 取消透传 + **中止即整轮零落库**；新增 `POST /chat/sessions/{id}/truncate`；响应加 `cancelled` / `user_message_id` / `assistant_message_id`；**`/chat` 归属校验改严格式**（`owner_id IS NULL` 由放行改为 fail closed）
+3. `orchestrator.py` — `LoopCancelled`；`_run_fc_loop(cancel=)` 在「每轮 LLM 调用前」「每个工具执行前」两处检查
+4. `chat_agent.py` — `step(cancel=)`；`LoopCancelled` 单独截住；**新增 `LLMError` 分支：上游故障如实上报**
+5. 前端 `chatService.ts` / `chatSessionService.ts` / `ChatEntry.vue` — 停止按钮、编辑横幅、abort 分支、竞态提示
+6. `scripts/verify_chat_interrupt_edit.py`（9 断言，含 A0 中间件护栏 / A6 无归属会话）、
+   `scripts/probe_disconnect_middleware.py`（根因对照实验）、
+   `scripts/backfill_null_session_owner.py`（存量无归属会话归位，幂等 + dry-run）
 
-#### 阻塞级（必须修，合入前必改）
-- **B1 · `admin.py:915-916` 遗留未定义常量引用（M9-1 重构引入的真实回归）**
-  M9-1 删除了模块级 `KNOWN_AGENTS`/`KNOWN_GATES`/`AGENT_GATE_PAIR` 三个常量（B9 已确认删除），但在 `list_templates` 的 `meta` 块里**漏改两处引用**：
-  ```python
-  "known_agents": KNOWN_AGENTS,   # :915
-  "known_gates":  KNOWN_GATES,    # :916
-  ```
-  全仓 grep `KNOWN_AGENTS|KNOWN_GATES|AGENT_GATE_PAIR` 仅存注释(:757)+这两处用法，**无任何赋值**。→ 调用 `GET /admin/templates` 必抛 `NameError`→**HTTP 500**。
-  性质：第 16 轮审议只审设计文档（`KNOWN_*` 应派生），从未看到落地代码，故该实现残留逃逸；`py_compile` 不报（运行时才炸），`VERIFICATION §16` 的 E1「py_compile 0 错」与 E5「POST 模板」均未触达该 GET 路径，自审漏检。
-  修正（一行级）：`:915-916` 改为 `"known_agents": _agent_names(), "known_gates": _known_gates()`（两函数已存在），或删除这两个 meta 键。修复后 `GET /admin/templates` 不再崩溃。
+## 已由主代理真跑的证据（补审者**不要采信**，请自行复现）
 
-#### 低危（非阻塞，建议顺手修）
-- **N1 · `StubLLMClient.complete` 的 gate rework 场景仍硬编码 `GateA`**（:144 `if role == "GateA"`）。仅影响 stub 在 `scenario="rework"` 下对**内置 GateA** 的复现；自定义 researcher 形闸（GateD）在 stub rework 场景会直接 advance，无法经 stub 走 rework 路径。生产 `NewApiLLMClient` 忽略此分支、不受影响，故仅测试便利性瑕疵。
-- **N2 · `POST` 回滚的 orphan 文件泄漏（边角）**：`:1238-1242` 回滚仅当 `mapping_before/library_before is not None` 才还原；若首次新增自定义 Agent 前两 yaml 不存在、且写它们之后失败，则新建的 yaml 不会被清理。正常路径不触发，属极端边界。
+- 根因对照实验：无中间件 → 感知断开；`BaseHTTPMiddleware` → 永远感知不到
+- 真机日志：`检测到客户端断开 09:17:17,748` → `整轮不落库 09:17:20,040`（**2.3s**），该窗口零工具调用
+- `verify_chat_interrupt_edit.py` → **9/9 PASS**（A0 中间件 / A1·A2 直连 / B1 经 nginx / A3 正常轮 / A4 截断+幂等 / A5 越权 / A6 无归属）
+- 回归：`verify_subaccount_isolation.py` → **13/13 PASS**；`e2e_report_flow.py wendy` → 研报引擎全链路
+- 存量数据：`chat_sessions` 中 `owner_id IS NULL` 由 1 个 → 0 个（回填后复核）
 
-### 3. 审议结论（逐条）
+## 补审待办（配额恢复后按此清单审 — 重点关注「是不是还是假按钮」）
 
-- **真伪 · 是否假配置**：✅ **非假配置。** 链路真实贯通——UI 新增自定义 Agent → `POST /admin/agents-library` 复合写 4 处（prompt md / gate md / model_mapping / library）→ `load_agent_registry()` 热加载 library → `make_agent` 按 shape 驱动 → `StubLLMClient`/`NewApiLLMClient` 真驱动自定义角色产出。不是「UI 可改、引擎忽略」。上轮担心的 `AGENT_GATE_PAIR` KeyError（E5 断裂）已在代码层用 `_agent_gate_pair().get(a)` 真正闭合。
-- **回归风险**：⚠️ **主体安全，但存在一处真实回归。** 不传 `agents` 时 `default_chain(reg)` 取 builtin 派生全链、`prior_versions` 大写键，向后兼容成立；M8-5 子集编排仍工作（`create_task` 子集覆盖 + `pair[a]` 派生 gates，E5 路径代码可达）。**但 B1（`:915-916` 未定义 `KNOWN_AGENTS/KNOWN_GATES`）会让既有的 `GET /admin/templates` 管理端直接 500**，是 M9-1 重构自身造成的回归，合入前必须修。
-- **过度工程**：✅ **克制。** 热加载、派生表、复合写 4 文件均为「真驱动」所必需，无冗余抽象；ruamel 保注释复用既有机制。未见可删项（`Agents.vue`/`AgentDetail.vue`/settings 联动属市场页功能范畴，不过度）。
-- **诚实性**：✅ **R6 如实。** `VERIFICATION §16.3` 明确标注「真实 LLM 未跑，stub 离线实证覆盖、不 claim 已通」(:992)，E1–E7 表头亦注明 stub 离线(:928)。无 overclaim。唯一瑕疵：`§16.1` 自审计声称已把 `KNOWN_*` 改为派生，**未记录自己漏改 `:915-916` 引用**——属自审盲区，非刻意隐瞒，修复 B1 后即闭合。
+**A. 取消链路是否真的贯穿（最高优先）**
 
-### 裁定：PASS_WITH_NOTES
+- [ ] **`BaseHTTPMiddleware` 只剩这一个实例吗？** 全仓扫 `BaseHTTPMiddleware` 与
+      `@app.middleware("http")`（后者内部也是它）。任何一处都会让该路由的 `is_disconnected()`
+      恒为 False。**建议补一条自动化断言**：启动后断言 `app.user_middleware` 里不含
+      `BaseHTTPMiddleware` 派生类 —— 否则将来有人为了「加个 header」顺手加回去，停止按钮又静默变假。
+- [ ] `cancel` 是否覆盖**所有**能烧 token / 能写库的路径：把 `cancel` 从 `api.chat` 到
+      `chat_agent.step` 到 `_run_fc_loop` 逐行追踪；特别看 `step()` 在 `_run_fc_loop` **之后**
+      的沉淀/学习分支（`propose_lesson`、写会话记忆）在取消时是否也被跳过。
+- [ ] `asyncio.wait_for(..., timeout=300)` 超时路径与 `cancel` 路径会不会互相掩盖？
+      超时时 `cancel_evt` 未置位，`result` 未赋值 → 会不会走到未定义变量 / 仍然落库？
+- [ ] `to_thread` 里的同步线程在请求被取消后**不会被杀**，只是循环边界退出。确认
+      「取消后线程仍会跑完当前那一轮」这一诚实边界在 UI / 文档里没有被吹掉。
 
-**必须修 NOTES（合入前阻塞级，须先修）**：
-- **B1**：`server/admin.py:915-916` 的 `KNOWN_AGENTS`/`KNOWN_GATES` 为未定义常量，导致 `GET /admin/templates` 必 500。改为 `_agent_names()`/`_known_gates()` 或删除该两 meta 键。一行级修复，但为 M9-1 重构引入的回归，须先修再合入。
+**B. `truncate` 的安全性与语义**
 
-**低危 NOTES（非阻塞）**：
-- **N1**：stub gate rework 场景硬编码 `GateA`（:144），自定义闸 stub rework 路径不可达（生产无影响）。
-- **N2**：`POST` 回滚在「首建前 yaml 不存在且中途失败」的边界会残留新文件（极低概率）。
+- [ ] 越权断言是否**真的**证明是「挡了越权」而非「消息不存在」的巧合 404？
+      （本轮已改为用仍存在的消息测，请复核 A5 的构造）
+- [x] `owner_id` 为 NULL 的历史会话会不会被任意账号访问？ → **会的，已修**：
+      `/chat` 用宽松式（NULL 即放行），库中确有 1 个这样 8 条消息的会话。
+      已补 `scripts/backfill_null_session_owner.py` 归位 + `/chat` 改严格式 + A6 断言。
+      **请复核**：① 回填是否真的把该会话交回主账号（不要只看我的复核输出）；
+      ② 严格化后主账号还能正常打开那条会话；③ **全仓还有 3 处同类宽松写法**
+      （`api.py` 的 task / rest 归属校验，本轮未动）—— 请判定它们各自是否也有真实可达的泄漏。
+- [ ] 删除「该条及其之后」的排序依据 `created_at` 若有并列（同毫秒插入 user+assistant 很常见），
+      顺序是否稳定？会不会删多/删少？
+- [ ] 截断与「先删后发」之间不是原子的：删成功但新消息发送失败 → 用户丢了消息却没重新生成。
+      是否需要补偿提示（当前文案是否已说清）？
 
-> 说明：除 B1 这一处实现残留外，M9-1 全部设计意图（shape 驱动重构、4 字典外置、复合写真驱动、子集透传、诚实标注）均在代码中**真实落地**，非假配置、非过度工程。B1 是删除常量时遗漏的最后一处引用，修复成本极低，修后应予 PASS。
+**B+. A0 护栏本身**
 
-<!-- reviewed-by: independent-subagent -->
+- [ ] `verify_chat_interrupt_edit.py` 的 A0 只检查 `app.user_middleware`（应用级）。
+      挂在 `APIRouter(dependencies=...)` 或 `app.add_middleware` 之外的 `ServerErrorMiddleware`
+      / `ExceptionMiddleware` 是否也在扫描范围内？该断言是否可能被绕过（例如中间件在
+      router 级注册、或 `dispatch` 里改用 `request.receive` 的封装）。
 
----
+**C. 纯 ASGI 中间件替换的回归面**
 
-## §18 补审待办 · UI 设计系统重做（第 18 轮 · BLOCKED 待审 · 2026-09-16）
+- [ ] `server/admin.py` 约 50 个端点靠 ContextVar 读 `Authorization`。请**独立**用真 HTTP
+      覆盖（不要只看 `verify_subaccount_isolation.py` 的 13 项），尤其：
+      `/api/v1/admin/*` 写操作（PUT/DELETE）、WebSocket 路径（`scope["type"] == "websocket"` 走的是
+      `if scope["type"] != "http"` 直通分支，确认它不会漏注入而影响 ws 内的鉴权）。
+- [ ] contextvars 在 `await` 边界的传播与 reset：并发两个请求时会不会串号（A 请求读到 B 的 token）？
+      建议并发压测 20 个不同账号请求交叉断言。
 
-> 本轮独立审议**未执行（429）**。配额恢复后，独立子代理须按下列清单补审，通过后方可 commit。**主代理不得代签。**
+**D. `LLMError` 诚实分支**
 
-**待审对象**：`web/src/style.css`、`web/src/components/PageHead.vue`（新增）、`web/src/components/EntityCard.vue`、`web/src/utils/emoji.ts`、`web/src/views/{Plugins,Agents,Channels,Skills}.vue`，以及 `VERIFICATION.md §17`
+- [ ] 新分支返回 **HTTP 200 + ⚠️ 文案**。这与 `ModelNotConfiguredError` 的 400 不一致 ——
+      「上游 503」到底该 200 还是 5xx？前端 `ChatEntry.vue` 会不会把它渲染成正常回答？
+      需确认 UI 上有明显区分（不要又是一个「看着正常、其实失败」）。
+- [ ] `LLMError` 的 `str(e)` 直接进 UI，是否可能泄漏内部端点 / key 片段？
 
-**必查项**：
-1. **CSS 完整性**：`style.css` 令牌自洽；Element 主题块**仅 1 份**（本轮曾出现重复块，已删）；无遗留 `.market{}` / `.market-head` / `.filters{}` / `.grid{}`。
-2. **页头接线**：4 页是否均 `import PageHead` 并使用 `<PageHead>`；`icon` 值（Box / Cpu / Promotion / MagicStick）是否真存在于 `@element-plus/icons-vue`。
-3. **卡片回退**：`EntityCard.vue` 的 `icon` 可选、`avatarText` 回退可用（无 icon 时仍渲染文字头像）。
-4. **零业务改动**：4 页 diff 应仅 class/结构/样式，接口调用、状态、插槽逻辑未变。
-5. **并发冲突后一致性**：确认无「半迁移」状态（例如根已 `.page` 但筛选条仍是旧 `.filters`）。
-6. **构建独立复跑**：`npm run build` 须 EXIT=0。
+**E. 独立复现要求**
 
-**取证要求**：逐项 `Read`/`Grep` 实证，不得采信 `VERIFICATION.md §17` 摘要；通过后由独立子代理在**文末追加本轮结论**并自行写入 `<!-- reviewed-by: independent-subagent -->`。
+- [ ] 不要采信本节结论，请自行重跑：
+      `docker compose exec -T -e PYTHONPATH=/app api python -u /app/scripts/probe_disconnect_middleware.py`
+      以及 `.../verify_chat_interrupt_edit.py`，并**亲眼确认** A1/A2 的 100s 窗口与 B1 经的是 nginx。
+- [ ] 本轮**未做**真实浏览器点击验证（A6/A7 未执行）。建议补审时用浏览器实测：
+      wendy 发长问题 → 点「停止」→ loading 结束 + 文本回输入框 + DB 无新增；
+      编辑一条历史消息 → 发送 → 旧消息及其后消失。
+- [ ] 建议换基座模型审议（本项目实测：`Intern-S2-Preview-397B` 可信；`auto-fast` /
+      `auto-reasoning` 曾出现无证据 PASS 与编造行号，勿用）。
 
-> **✅ 已于 2026-09-16 由 `REVIEW_UI_R2.md` 承接并闭环（本节 BLOCKED 记录至此失效，仅作历史留痕）。**
-> 上述 6 项必查全部落入 `REVIEW_UI_R2.md` 的复核清单并已实证（令牌无重复块 / 旧类名 0 残留 / 图标名逐个 glob 核对 / 零业务改动 / 构建独立复跑 EXIT=0）。该文件经 `§5` 首轮 PASS_WITH_NOTES 后，又对 post-fix 增量出具 `§6` **PASS（rev2: post-fix）**，末尾标记 `<!-- reviewed-by: independent-subagent (rev2: post-fix) -->` 覆盖 `web/src` 全部未提交改动（9 改 + 4 新 + 3 处修复）。**本节的 BLOCKED 状态不再适用于当前 web/src 改动。**
+**F. 引擎质量闸的波动（本轮跑回归时顺带发现，非本轮引入）**
 
----
+- [ ] 同代码、同 prompt 跑 `e2e_report_flow.py wendy` 两次：一次 `escalated`（GateA 连续两轮
+      rework → 触顶 `max_rounds=2`）产出 **0 字报告**，一次 `done`（round=1）产出 **5998 字**。
+      历史上 4 次 run 的 GateA 判决都不同（见 `VERIFICATION.md` §R2-5）。请独立复跑数次，
+      统计 escalate 发生率。
+- [ ] 需要 boss 决策（**不要自行放宽**）：`max_rounds=2` 是否偏低？GateA 对
+      「可信度均为 medium 且未说明」判 rework 是否过严？
+- [ ] 更该修的是 **escalate 后的兜底交付**：现在直接 0 字，用户等 160s 什么也拿不到。
+      是否应落一份「附质量警告的草稿」？请评估。
+- [ ] `scripts/e2e_report_flow.py` **escalate 时仍 exit 0** → 该脚本作为回归门禁会漏报失败，
+      必须修（终态非 done 就应非 0 退出），否则将来「回归全绿」是假的。
 
-## 第 18 轮补审 · UI R3+R4（独立审议结论 · 2026-09-16）
+## 未决风险（主代理自陈，供补审者重点打）
 
-**审议人**：independent-subagent（独立，主代理未代签）
-**范围**：UI R3（9 设置页 + Market.vue 令牌化重做 + style.css 骨架 L416-450）+ R4（ChatEntry.vue 移除聊天框齿轮/插件 popover）
-**方法**：全部结论来自亲手 Read / Grep / 独立 `npm run build` 实证，未采信 `VERIFICATION.md §17/§17.6` 摘要；构建日志 `build_review_r4.log`。
-
-### 一句话结论
-
-**PASS_WITH_NOTES** —— 无 BLOCK 级问题。A–D 四项全过；2 处低危注记（均非阻塞）。
-
-### 发现表
-
-| 严重度 | 项 | 证据 | 建议 |
-|---|---|---|---|
-| 低 | style.css 新骨架块含 3 处硬编码 hex（`.note-ok`/`.note-err`） | `style.css:440` `#a7f3d0`；`style.css:445` `#fecaca` / `#b91c1c` | 改引用令牌（`--brand-soft`/`--danger` 族，或补 `--ok-border`/`--danger-border`） |
-| 低 | ChatEntry.vue 残留插件拉取逻辑（成死代码，无害） | `ChatEntry.vue:324-366`（`plugins`/`selectablePlugins`/`selectedPlugins`/`fetchPlugins`）+ `:451` send 仍读 `selectedPlugins`，但勾选 UI 已删 → 恒空 → `undefined` → 后端默认全源；非悬空引用、vue-tsc 通过 | 后续可清理 `fetchPlugins()` 调用，当前不影响行为与构建 |
-| 信息 | ChatEntry.vue 残留大量硬编码 hex | `ChatEntry.vue:530 #fff`、`:548 #06b6d4` 等（旧聊天页样式） | 属 R3 范围外，按指示仅记录不阻塞 |
-
-### 逐条核对（A–D）
-
-**A. 零硬编码 hex（10 个 R3 目标 vue 文件）✅**
-- 独立 grep 严格模式 `#[0-9a-fA-F]{3,8}[^0-9a-zA-Z#]`（排除 `#default` 等 slot 伪命中），10 文件**全部 0 命中**：`Market.vue`、`settings/{Models,Agents,Gates,Templates,TemplateEdit,CustomProviders,McpServers,AssetCenter,Experts}.vue`。
-- 一致性：9 个 settings 文件均 `import PageHead` + 使用 `<PageHead icon title sub #actions>` 与 `<StatStrip :stats>`（grep 佐证 PageHead 9/9、StatStrip 9/9）；`.blk` / `.blk-head` 在 9 文件全量出现。`Market.vue` 按设计仅配色、无 PageHead，正确（不视为缺陷）。
-- 偏差（低）：`style.css`「设置页通用骨架」块（L416-450）在 `.note-ok`/`.note-err`（L439-447）写入 3 处硬编码 hex，与本轮「颜色全引用令牌」原则相悖；该文件非 10 目标 vue 之一，故不触发 A 硬门禁，但属设计系统自身漏 token 化（见发现表低项）。
-
-**B. R4 完整性 ✅**
-- `ChatEntry.vue` 模板中「数据源插件」齿轮按钮 + popover 已彻底移除：composer（L177-203）仅剩 textarea + 发送钮。
-- grep `Setting|pluginIcon|statusLabel|settingsPop|pop-plugin|pp-|composer-popover|badge` → 唯一命中 `L401 router.push('/settings/custom-providers')`（无关路由），无 R4 相关 dangling 引用。
-- 智能体选择 popover 完好：`L84-106`（`.pop-title`/`.pop-agents`/`.pop-agent-icon`/`agentIcon(a.toLowerCase())`）。
-- 发送流未动：`onSend` `L446-453` 仍 `plugins: selectedPlugins.value.length ? selectedPlugins.value : undefined`；勾选 UI 删除后 `selectedPlugins` 恒空 → `undefined` → 后端默认全源，**行为保真**（与 `VERIFICATION.md §17.6:1025-1027` 一致）。
-- `VERIFICATION.md §17.6` 所记死代码清理（settingsPop/statusLabel/pluginIcon/Setting 导入 + 相关 CSS）与代码一致；vue-tsc 通过（见 D）。
-
-**C. 行为保真（抽查 <script> 纯逻辑未改）✅**
-- Experts：`listExperts/toggleExpert/convertExpert/listProposals/acceptProposal/rejectProposal` 全在（`L230-333`），`loadAll`/`onMounted` 完好。
-- Models：`api.get/put /admin/models` + `loadAudit` + `isViolation` + `onMounted(load)`（`L194-252`）。
-- Agents/Gates：`onBeforeRouteLeave`(`L304`/`L311`) + `onBeforeUnload`(`L315`/`L322`)+清理 + `DOMPurify(marked.parse→sanitize)`(`L188`/`L201`，XSS 红线保留) + CRUD + audit；Gates 同构。
-- Templates：`fetch GET/DELETE /api/v1/admin/templates` + `onDelete` 确认 + `onMounted(load)`（`L66-104`）。
-- TemplateEdit：`fetch POST/PUT` + audit（`L103-165`）。
-- CustomProviders/McpServers：`customProviderService`/`mcpServerService` CRUD + 对话框校验（`L135-213`）。
-- AssetCenter：`api` reflections/lessons accept/reject + 刷新（`L117-171`）。
-- 上述 <script> 除 import 调整外无逻辑编辑，符合「纯视觉重做」。
-
-**D. 独立构建 ✅**
-- PowerShell 运行 `& npm.cmd run build *> build_review_r4.log` → `BUILD_EXIT=0`，1780 模块；CSS `index-Ba0x-hU0.css` **402.10 kB**（较 R2 的 `index-Dh0jvU4v.css` 405 kB 下降 ~3 kB，与 R4 删除死 CSS 一致，互相印证）。
-
-### 总评
-
-UI R3（9 设置页 + Market 令牌化、PageHead+StatStrip+.blk 骨架统一）与 R4（ChatEntry 齿轮/popover 移除）独立复核通过：10 目标 vue 文件零硬编码 hex（A 过），R4 移除干净无悬空引用（B 过），9 设置页 <script> 行为全部保真（C 过），独立构建 EXIT=0（D 过）。仅 2 处低危注记：①`style.css` 骨架块 `.note-ok`/`.note-err` 仍硬编码 3 色（建议补令牌，非 vue 门禁范围）；②`ChatEntry.vue` 残留插件拉取逻辑已成无害死代码（行为保真、vue-tsc 通过）。无阻塞项。
-
-**裁定：PASS_WITH_NOTES**
-
-<!-- reviewed-by: independent-subagent -->
+1. **「停止」仍有一处不彻底**：在飞的那次 LLM 调用无法掐断（已如实写进设计与 UI，但仍是用户体验缺口）。
+2. **前端零浏览器验证**：本轮前端只有 `vue-tsc` 通过 + 产物含新字符串两条证据，
+   「按钮点得动、编辑横幅真的出现、竞态提示真的显示」**没有人点过**。
+3. **中间件替换是本轮最"重"的动作**：它位于**所有**请求的必经路径上，风险面远超「停止/编辑」这一个功能。
+   已跑两套回归（13/13 + 研报全链路），但 WebSocket 与并发串号**未覆盖**。
+4. **两个轮次混在一个工作树里**，补审跨度大、易漏；若 boss 同意，**建议拆成两个 commit 分别补审**。

@@ -214,6 +214,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { authFetch } from '@/api/client';
 import type { PluginItem } from '@/types';
 import EntityCard from '@/components/EntityCard.vue';
 import PageHead from '@/components/PageHead.vue';
@@ -325,7 +326,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch(`${API}/plugins`);
+    const res = await authFetch(`${API}/plugins`);
     if (!res.ok) throw new Error(`加载失败：${res.status}`);
     const data = await res.json();
     items.value = (data.items ?? []) as PluginItem[];
@@ -367,7 +368,7 @@ async function onDisable(p: PluginItem): Promise<void> {
 }
 async function putPlugin(id: string, body: Record<string, unknown>): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/plugins/${id}`, {
+    const res = await authFetch(`${API}/admin/plugins/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -386,7 +387,7 @@ async function putPlugin(id: string, body: Record<string, unknown>): Promise<voi
 
 async function onCreate(): Promise<void> {
   try {
-    const res = await fetch(`${API}/admin/plugins`, {
+    const res = await authFetch(`${API}/admin/plugins`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...form }),
@@ -412,7 +413,7 @@ async function onConnect(): Promise<void> {
     ? { cookie: secret.value }
     : { api_key: secret.value };
   try {
-    const res = await fetch(`${API}/admin/plugins/${target.id}/connect`, {
+    const res = await authFetch(`${API}/admin/plugins/${target.id}/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -436,7 +437,7 @@ async function onDelete(p: PluginItem): Promise<void> {
   } catch {
     return;
   }
-  const res = await fetch(`${API}/admin/plugins/${p.id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API}/admin/plugins/${p.id}`, { method: 'DELETE' });
   if (res.ok) {
     ElMessage.success('已删除');
     await load();

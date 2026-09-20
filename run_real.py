@@ -80,9 +80,12 @@ def main():
         print(f"[preflight] ⚠️ 网关不可达：{e}")
         print("   → 继续真实运行；首个 LLM 调用将触发 rework→escalate（验证故障容错路径，非失败）。")
 
-    # 2) 工具（Tavily 真实检索需 TAVILY_API_KEY；否则 MOCK 占位并告警）
+    # 2) 工具（数据源密钥取自 tenants/<账号>/.secrets/plugins.env；缺密钥的源不参与检索并逐源告警）
     bundle = build_tools()
-    print(f"[tools] web_search={'MOCK(占位)' if bundle.using_mock_search else 'TAVILY(真实)'}"
+    _degr = [d.get("id") for d in (getattr(bundle, "degraded", None) or [])]
+    print(f"[tools] web_search 已装载 {len(getattr(bundle.web_search, 'providers', []) or [])} 个源"
+          f"  mock={'是(显式)' if bundle.using_mock_search else '否'}"
+          f"  未参与={_degr or '无'}"
           f"  data_proc=on  doc_export=on(export_dir={bundle.doc_export.export_dir})")
 
     # 3) 任务（可经环境变量覆盖）

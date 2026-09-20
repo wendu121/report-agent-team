@@ -25,11 +25,19 @@ export type AgentRole = BuiltinAgentRole | (string & {});
 export type BuiltinGateName = 'GateA' | 'GateB' | 'GateC';
 export type GateName = BuiltinGateName | (string & {});
 
-// 引擎事件类型（3 种，对齐 schema §4.1 + UIDESIGN §8）
+// 引擎事件类型（4 种，对齐 schema §4.1 + UIDESIGN §8）
+// 修正（M13-gate-degradation）：原先只声明 3 种，**漏了 `researcher_records_synthesized`**
+// ——后端 `server/api.py` 的 Literal 里有 4 种，实跑中该事件真的出现过。
+// 漏声明的两种表现形式（均已实测复现）：
+//   ① 快照重建路径 —— `utils/timeline.ts::engineEventToNode` 的 titleMap 查不到键 → **标题为空**的节点；
+//   ② 实时 WS 路径 —— 引擎事件经 `_stream_engine_events` 原样广播，落到 `wsEventToNode` 的
+//      default 分支 → 渲染成「未知事件 researcher_records_synthesized」。
+// 故本类型同时被 `types/engine.ts::WSEventType` 复用；两条路径共用同一套映射（ENGINE_EVENT_NODES）。
 export type EngineEventType =
   | 'agent_output_unusable'
   | 'writer_citation_regenerated'
-  | 'gate_llm_unavailable_degraded_advance';
+  | 'gate_llm_unavailable_degraded_advance'
+  | 'researcher_records_synthesized';
 
 // ==================== 用户任务 ====================
 
@@ -79,10 +87,21 @@ export interface ToolStatus {
 
 // ==================== Gate 审计 ====================
 
+/** 本条闸记录的**依据来源**（与后端引擎的 4 个分支 1:1，不新增判定逻辑） */
+export type GateReviewStatus = 'llm_reviewed' | 'code_verified' | 'degraded_unavailable';
+
+/** eval_score 的来源：闸 LLM 自评 / 独立评分器（同一字段承载两种语义，必须可区分） */
+export type EvalScoreSource = 'gate_llm' | 'independent_scorer';
+
 export interface GateReview {
   decision: GateDecision;
   reason: string;
-  eval_score: number;
+  /** 可空：闸降级且独立评分器也失败时为 null（后端 eval_score 已改可空） */
+  eval_score: number | null;
+  /** 依据来源；历史数据可能缺失（前端由 utils/reviewStatus.ts 兜底推断，不在此处判断） */
+  review_status?: GateReviewStatus | null;
+  /** 分数来源；历史数据无从判断时为 null */
+  eval_score_source?: EvalScoreSource | null;
   problem_points: string[];
   gate: GateName;
   round: number;

@@ -136,6 +136,7 @@ import DOMPurify from 'dompurify';
 import api from '@/api/client';
 import PageHead from '@/components/PageHead.vue';
 import StatStrip from '@/components/StatStrip.vue';
+import { formatTime } from '@/utils/formatter';
 
 interface GateMeta {
   name: string;
@@ -297,7 +298,7 @@ function onTab(e: KeyboardEvent): void {
 
 function fmtTime(iso: string): string {
   if (!iso) return '-';
-  return new Date(iso).toLocaleString('zh-CN');
+  return formatTime(iso);
 }
 
 /** 审计时间戳形如 2026-09-08T05-12-33-123456Z */

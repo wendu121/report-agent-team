@@ -33,6 +33,11 @@
           <el-icon><Grid /></el-icon>
           <span>能力市场</span>
         </el-menu-item>
+        <!-- 统一审核中心：技能/专家提案 + 待推送变更，老板逐一点通过/打回 -->
+        <el-menu-item index="/review">
+          <el-icon><Stamp /></el-icon>
+          <span>审核中心</span>
+        </el-menu-item>
       </el-menu>
 
       <!-- ③ 聊天记录（每个聊天一个窗口：可切换 / 新建 / 删除 / 折叠） -->
@@ -55,6 +60,15 @@
           />
           <button type="button" class="icon-btn" title="新对话" @click="newChat">
             <el-icon><Plus /></el-icon>
+          </button>
+          <button
+            type="button"
+            class="icon-btn"
+            title="清空全部聊天记录"
+            :disabled="!chatSessions.length"
+            @click="clearAllChats"
+          >
+            <el-icon><Delete /></el-icon>
           </button>
         </div>
 
@@ -83,6 +97,12 @@
           <el-icon class="sect-head__icon"><Clock /></el-icon>
           <span class="sect-head__label">历史记录</span>
           <span v-if="history.length" class="sect-head__count">{{ history.length }}</span>
+          <el-icon
+            v-if="history.length"
+            class="sect-head__clear"
+            title="清空全部历史记录"
+            @click.stop="clearAllTasks"
+          ><Delete /></el-icon>
           <el-icon class="sect-head__caret"><ArrowDown /></el-icon>
         </div>
 
@@ -97,6 +117,18 @@
               <div class="history-topic" :title="t.topic || '无主题'">
                 {{ t.topic || '无主题' }}
               </div>
+              <el-icon
+                v-if="isRunning(t.status)"
+                class="history-item-del is-disabled"
+                title="运行中不可删除"
+                @click.stop
+              ><Delete /></el-icon>
+              <el-icon
+                v-else
+                class="history-item-del"
+                title="删除该任务"
+                @click.stop="delTask(t.task_id)"
+              ><Delete /></el-icon>
               <el-icon class="history-arrow"><ArrowRight /></el-icon>
             </div>
             <div class="history-meta">
@@ -112,13 +144,27 @@
 
       <!-- ⑤ 左下角用户区：含调试开关 + 设置入口（原配置控制台折叠至此） -->
       <div class="user-zone">
-        <div class="user-row">
-          <div class="user-avatar">U</div>
-          <div class="user-meta">
-            <div class="user-name">管理员</div>
-            <div class="user-role">本地部署</div>
+        <el-dropdown trigger="click" @command="onUserCommand" class="user-row-dropdown">
+          <div class="user-row">
+            <div class="user-avatar">{{ avatarText }}</div>
+            <div class="user-meta">
+              <div class="user-name">{{ displayName }}</div>
+              <div class="user-role">{{ roleLabel }}</div>
+            </div>
           </div>
-        </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="change-password">
+                <el-icon><Key /></el-icon>
+                <span>修改密码</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="logout" divided>
+                <el-icon><SwitchButton /></el-icon>
+                <span>退出登录</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <div class="user-actions">
           <div class="debug-row">
             <span class="debug-label">调试模式</span>
@@ -140,6 +186,7 @@
                 <el-dropdown-item command="mcp-servers">MCP Server</el-dropdown-item>
                 <el-dropdown-item command="experts">专家团</el-dropdown-item>
                 <el-dropdown-item command="asset-center">经验 / 反思</el-dropdown-item>
+                <el-dropdown-item v-if="authStore.me?.role === 'main'" command="accounts" divided>账号管理</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -152,6 +199,35 @@
         <slot />
       </el-main>
     </el-container>
+
+    <!-- 当前账号自助改密（无需旧密码，属「重置」语义） -->
+    <el-dialog v-model="pwdVisible" title="修改密码" width="420px" destroy-on-close @closed="onPwdClosed">
+      <el-form :model="pwdForm" label-width="86px" @submit.prevent>
+        <el-form-item label="新密码" :error="pwdError">
+          <el-input
+            v-model="pwdForm.newPwd"
+            type="password"
+            show-password
+            placeholder="至少 8 位"
+            @input="pwdError = ''"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input
+            v-model="pwdForm.confirmPwd"
+            type="password"
+            show-password
+            placeholder="再次输入新密码"
+            @input="pwdError = ''"
+            @keyup.enter="submitPwd"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdVisible = false">取消</el-button>
+        <el-button type="primary" :loading="pwdLoading" @click="submitPwd">确定</el-button>
+      </template>
+    </el-dialog>
   </el-container>
 </template>
 
@@ -162,13 +238,27 @@ import { storeToRefs } from 'pinia';
 import { useSettingsStore } from '@/stores/settings';
 import { useHistoryStore } from '@/stores/history';
 import { useChatSessionStore } from '@/stores/chatSessionStore';
-import { Plus, Delete, Search } from '@element-plus/icons-vue';
+import { useAuthStore } from '@/stores/authStore';
+import { Plus, Delete, Search, Key, Stamp } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { formatTime } from '@/utils/formatter';
 import type { TaskStatus } from '@/types';
 
 const route = useRoute();
 const router = useRouter();
 const settingsStore = useSettingsStore();
 const { debugMode } = storeToRefs(settingsStore);
+
+// 用户区：显示真实登录账号（此前硬编码「管理员」，对所有账号都错）
+const authStore = useAuthStore();
+const displayName = computed(() => authStore.me?.username || '未登录');
+const roleLabel = computed(() => {
+  const r = authStore.me?.role;
+  if (r === 'main') return '主账号';
+  if (r === 'sub') return '子账号';
+  return '本地部署';
+});
+const avatarText = computed(() => (authStore.me?.username || 'U').charAt(0).toUpperCase());
 
 // 侧边栏历史记录（共享 Pinia store：ChatEntry 提交后自动 refresh）
 const historyStore = useHistoryStore();
@@ -217,6 +307,8 @@ function toggleChat(): void {
   }
 }
 onMounted(() => {
+  // 首次进入外壳时补齐账号信息（persist 已有 me 则不重复请求）
+  if (!authStore.me) void authStore.fetchMe();
   void historyStore.refresh();
   void chatSessionStore.refresh();
 });
@@ -240,6 +332,15 @@ async function newChat(): Promise<void> {
 }
 async function delChat(id: string): Promise<void> {
   try {
+    await ElMessageBox.confirm(
+      '删除后该对话全部消息不可恢复，确定删除吗？',
+      '删除对话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    );
+  } catch {
+    return; // 用户取消，不动
+  }
+  try {
     await chatSessionStore.remove(id);
     if (currentSessionId.value === id) router.push('/');
   } catch (e) {
@@ -256,11 +357,80 @@ const statusLabel: Record<TaskStatus, string> = {
   aborted: '已中止',
 };
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function isRunning(status: string): boolean {
+  return status === 'running' || status === 'rework';
+}
+
+// ---- 历史记录：单删（运行中/返工中由后端 409 拦截）----
+async function delTask(taskId: string): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '删除后该任务及其关联记录不可恢复，确定删除吗？',
+      '删除任务',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await historyStore.remove(taskId);
+    ElMessage.success('已删除该任务');
+  } catch (e: any) {
+    if (e?.status === 409) {
+      ElMessage.warning('运行中的任务不可删除');
+    } else {
+      console.error('删除任务失败', e);
+      ElMessage.error('删除失败，请重试');
+    }
+  }
+}
+
+// ---- 聊天记录：一键清空全部 ----
+async function clearAllChats(): Promise<void> {
+  if (!chatSessions.value.length) return;
+  try {
+    await ElMessageBox.confirm(
+      `将删除全部 ${chatSessions.value.length} 个会话，且不可恢复。确定吗？`,
+      '清空全部聊天记录',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  try {
+    const res = await chatSessionStore.clearAll();
+    ElMessage.success(`已清空 ${res.deleted} 个会话`);
+    // 当前会话必然已被清，若正停留在聊天页则退回首页
+    if (route.path.startsWith('/chat/')) router.push('/');
+  } catch (e) {
+    console.error('清空聊天记录失败', e);
+    ElMessage.error('清空失败，请重试');
+  }
+}
+
+// ---- 历史记录：一键清空全部（运行中任务保留）----
+async function clearAllTasks(): Promise<void> {
+  if (!history.value.length) return;
+  try {
+    await ElMessageBox.confirm(
+      '将清空全部已结束的历史任务（运行中的任务会保留），且不可恢复。确定吗？',
+      '清空全部历史记录',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  try {
+    const res = await historyStore.clearAll();
+    if (res.skipped_running > 0) {
+      ElMessage.warning(`已清空 ${res.deleted} 个历史任务，${res.skipped_running} 个运行中任务已保留`);
+    } else {
+      ElMessage.success(`已清空 ${res.deleted} 个历史任务`);
+    }
+  } catch (e) {
+    console.error('清空历史失败', e);
+    ElMessage.error('清空失败，请重试');
+  }
 }
 
 // 导航高亮：顶层项精确匹配；设置子页精确高亮；流转页回退到模板
@@ -268,6 +438,7 @@ const activeMenu = computed(() => {
   const p = route.path;
   if (p.startsWith('/settings')) return p === '/settings' ? '/settings/models' : p;
   if (p === '/') return '/';
+  if (p === '/review') return '/review';
   if (p.startsWith('/agents')) return '/agents';
   // 能力市场（统一页）及其内嵌的三个直达路由，统一高亮「能力市场」
   if (p === '/market' || p.startsWith('/plugins') || p.startsWith('/skills') || p.startsWith('/channels')) return '/market';
@@ -293,6 +464,62 @@ function goSettings(cmd: string): void {
     return;
   }
   router.push(`/settings/${cmd}`);
+}
+
+// ---- 当前账号自助改密 ----
+const pwdVisible = ref(false);
+const pwdLoading = ref(false);
+const pwdForm = ref({ newPwd: '', confirmPwd: '' });
+const pwdError = ref('');
+
+function openChangePwd(): void {
+  pwdForm.value = { newPwd: '', confirmPwd: '' };
+  pwdError.value = '';
+  pwdVisible.value = true;
+}
+
+async function submitPwd(): Promise<void> {
+  const { newPwd, confirmPwd } = pwdForm.value;
+  if (newPwd.length < 8) {
+    pwdError.value = '密码至少 8 位';
+    return;
+  }
+  if (newPwd !== confirmPwd) {
+    pwdError.value = '两次输入的密码不一致';
+    return;
+  }
+  pwdError.value = '';
+  pwdLoading.value = true;
+  try {
+    await authStore.changePassword(newPwd);
+    ElMessage.success('密码已修改，请重新登录');
+    pwdVisible.value = false;
+    // 密码已变，JWT 仍有效但强制重新登录以使新密码生效
+    authStore.logout();
+    if (router.currentRoute.value.name !== 'Login') {
+      router.replace({ name: 'Login' });
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || '修改失败');
+  } finally {
+    pwdLoading.value = false;
+  }
+}
+
+function onPwdClosed(): void {
+  pwdForm.value = { newPwd: '', confirmPwd: '' };
+  pwdError.value = '';
+}
+
+function onUserCommand(cmd: string): void {
+  if (cmd === 'logout') {
+    authStore.logout();
+    if (router.currentRoute.value.name !== 'Login') {
+      router.replace({ name: 'Login' });
+    }
+  } else if (cmd === 'change-password') {
+    openChangePwd();
+  }
 }
 </script>
 
@@ -470,6 +697,21 @@ function goSettings(cmd: string): void {
   border-color: var(--brand);
 }
 .icon-btn :deep(.el-icon) { font-size: 14px; }
+.icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: var(--surface);
+}
+/* 历史记录区「清空全部」图标按钮（紧跟标题右侧，hover 变红） */
+.sect-head__clear {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--ink-300, #cbd5e1);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s var(--ease);
+}
+.sect-head__clear:hover { color: var(--danger, #ef4444); }
 
 .sect-list {
   flex: 1 1 auto;
@@ -534,6 +776,22 @@ function goSettings(cmd: string): void {
   transition: background 0.15s var(--ease);
 }
 .history-item:hover { background: var(--surface-2); }
+/* 历史记录单条删除图标：hover 显出，运行/返工中置灰且常显、不可点 */
+.history-item-del {
+  font-size: 13px;
+  color: var(--ink-300, #cbd5e1);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.history-item:hover .history-item-del { opacity: 1; }
+.history-item-del:hover { color: var(--danger, #ef4444); }
+.history-item-del.is-disabled {
+  opacity: 1;
+  color: var(--ink-300, #cbd5e1);
+  cursor: not-allowed;
+}
+.history-item-del.is-disabled:hover { color: var(--ink-300, #cbd5e1); }
 .history-row {
   display: flex;
   align-items: center;
